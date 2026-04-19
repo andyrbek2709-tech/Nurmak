@@ -6,7 +6,7 @@ import {
   getLeadsByStatus, getLeadsToday, normalizePhone,
 } from "../services/supabase.js";
 import { getUser, upsertUser } from "../services/users.js";
-import { initDella, startMonitoring, stopMonitoring, isMonitoringActive } from "../services/della.js";
+import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters } from "../services/fafa.js";
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
 
@@ -17,7 +17,7 @@ const reminders = new Map();
 export function registerHandlers(bot) {
   _bot = bot;
 
-  initDella(bot, MANAGER_CHAT_ID);
+  initFafa(bot, MANAGER_CHAT_ID);
 
   bot.start(handleStart);
   bot.on("text", handleText);
@@ -27,6 +27,7 @@ export function registerHandlers(bot) {
   bot.command("active", (ctx) => handleOwnerList(ctx, "in_progress", "🔄 В работе"));
   bot.command("today", handleOwnerToday);
   bot.command("monitor", handleMonitor);
+  bot.command("filter", handleFilter);
 
   bot.on("callback_query", handleCallback);
 }
@@ -138,6 +139,21 @@ async function handleCallback(ctx) {
 
     const msgId = ctx.callbackQuery.message.message_id;
 
+    if (action === "fset") {
+      const field = id; // "from", "to", "cargo", "clear"
+      if (field === "clear") {
+        clearFilters();
+        await ctx.answerCbQuery("Фильтры сброшены");
+        await ctx.editMessageText(buildFilterText(), { reply_markup: buildFilterKeyboard() });
+      } else {
+        const labels = { from: "Откуда (город)", to: "Куда (город)", cargo: "Тип груза" };
+        filterAwait.set(String(chatId), field);
+        await ctx.answerCbQuery();
+        await ctx.reply(`Напишите значение для «${labels[field]}» (или «-» чтобы убрать фильтр):`);
+      }
+      return;
+    }
+
     if (action === "accept") {
       const lead = await getLeadById(id);
       await updateLeadStatus(id, "in_progress");
@@ -198,6 +214,40 @@ async function handleOwnerToday(ctx) {
   }
 }
 
+// ─── Filter state machine ─────────────────────────────────────────────────────
+// Tracks which filter field the owner is currently setting
+const filterAwait = new Map(); // chatId → "from" | "to" | "cargo"
+
+function buildFilterText() {
+  const f = getFilters();
+  return [
+    `⚙️ Текущие фильтры мониторинга FA-FA:`,
+    ``,
+    `🗺 Откуда: ${f.from || "любой"}`,
+    `🗺 Куда: ${f.to || "любой"}`,
+    `📦 Груз: ${f.cargo || "любой"}`,
+  ].join("\n");
+}
+
+function buildFilterKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✏️ Откуда", callback_data: "fset:from" },
+        { text: "✏️ Куда", callback_data: "fset:to" },
+        { text: "✏️ Груз", callback_data: "fset:cargo" },
+      ],
+      [{ text: "🗑 Сбросить всё", callback_data: "fset:clear" }],
+    ],
+  };
+}
+
+async function handleFilter(ctx) {
+  const chatId = String(ctx.chat.id);
+  if (chatId !== String(MANAGER_CHAT_ID)) { await ctx.reply("Нет доступа."); return; }
+  await ctx.reply(buildFilterText(), { reply_markup: buildFilterKeyboard() });
+}
+
 async function handleMonitor(ctx) {
   const chatId = String(ctx.chat.id);
   const allowed = String(MANAGER_CHAT_ID);
@@ -238,6 +288,21 @@ export async function handleText(ctx) {
   const chatId = ctx.chat.id;
   const userMessage = ctx.message.text;
   if (!userMessage?.trim()) return;
+
+  // If owner is setting a filter field — intercept
+  const awaitField = filterAwait.get(String(chatId));
+  if (awaitField && String(chatId) === String(MANAGER_CHAT_ID)) {
+    filterAwait.delete(String(chatId));
+    const value = userMessage.trim() === "-" ? null : userMessage.trim();
+    setFilter(awaitField, value);
+    const labels = { from: "Откуда", to: "Куда", cargo: "Груз" };
+    await ctx.reply(
+      `${value ? `✅ Фильтр «${labels[awaitField]}» установлен: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${buildFilterText()}`,
+      { reply_markup: buildFilterKeyboard() }
+    );
+    return;
+  }
+
   await processMessage(ctx, chatId, userMessage);
 }
 
