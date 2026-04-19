@@ -69,7 +69,6 @@ function buildKeyboard(lead) {
   ];
 
   if (phone) {
-    rows[1].unshift({ text: "📞 Позвонить", url: `tel:+${phone}` });
     rows.push([{ text: "💬 WhatsApp", url: `https://wa.me/${phone}` }]);
   }
 
