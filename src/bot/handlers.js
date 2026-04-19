@@ -102,28 +102,31 @@ async function handleCallback(ctx) {
   const data = ctx.callbackQuery?.data;
   if (!data) return;
 
-  const [action, id] = data.split(":");
+  const [action, ...rest] = data.split(":");
+  const id = rest.join(":");
   if (!id) return;
 
+  const chatId = ctx.callbackQuery.message?.chat?.id;
+  console.log(`Callback: action=${action} id=${id.substring(0, 8)} chatId=${chatId}`);
+
   try {
+    await ctx.answerCbQuery();
+
     if (action === "accept") {
       await updateLeadStatus(id, "in_progress");
-      await ctx.answerCbQuery("✅ Принято");
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      await ctx.reply(`✅ Заявка ${id.substring(0, 8)} принята в работу.`);
+      await ctx.telegram.editMessageReplyMarkup(chatId, ctx.callbackQuery.message.message_id, undefined, { inline_keyboard: [] });
+      await ctx.telegram.sendMessage(chatId, `✅ Заявка ${id.substring(0, 8)} принята в работу.`);
     } else if (action === "reject") {
       await updateLeadStatus(id, "canceled");
-      await ctx.answerCbQuery("❌ Отклонено");
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      await ctx.reply(`❌ Заявка ${id.substring(0, 8)} отклонена.`);
+      await ctx.telegram.editMessageReplyMarkup(chatId, ctx.callbackQuery.message.message_id, undefined, { inline_keyboard: [] });
+      await ctx.telegram.sendMessage(chatId, `❌ Заявка ${id.substring(0, 8)} отклонена.`);
     } else if (action === "delay") {
-      await ctx.answerCbQuery("⏸ Напомним через 30 мин");
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      await ctx.reply(`⏸ Напомним через 30 минут.`);
+      await ctx.telegram.editMessageReplyMarkup(chatId, ctx.callbackQuery.message.message_id, undefined, { inline_keyboard: [] });
+      await ctx.telegram.sendMessage(chatId, `⏸ Напомним через 30 минут.`);
       scheduleReminder(id, 30 * 60 * 1000, `⏰ Напоминание: заявка ${id.substring(0, 8)} ещё ждёт обработки.`);
     }
   } catch (err) {
-    console.error("Callback error:", err.message);
+    console.error("Callback error:", err.message, err.stack);
     await ctx.answerCbQuery("Ошибка").catch(() => {});
   }
 }
