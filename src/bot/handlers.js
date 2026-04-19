@@ -378,7 +378,7 @@ export async function handleText(ctx) {
     filterAwait.delete(String(chatId));
     const value = userMessage.trim() === "-" ? null : userMessage.trim();
     setFilter(awaitField, value);
-    const labels = { from: "Откуда", to: "Куда", cargo: "Груз" };
+    const labels = { from: "Откуда", to: "Куда", cargo: "Груз", truck_type: "Тип машины" };
     await ctx.reply(
       `${value ? `✅ Фильтр «${labels[awaitField]}» установлен: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${buildFilterText()}`,
       { reply_markup: buildFilterKeyboard() }

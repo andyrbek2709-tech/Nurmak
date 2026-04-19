@@ -178,46 +178,63 @@ async function fillSearchForm(page) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
 
-  // Fill FROM field + handle autocomplete
-  if (filters.from) {
-    const fromSel = "input[name='from'], input[name='from_city'], #from_city";
-    await page.fill(fromSel, filters.from).catch(() => {});
-    console.log(`[FAFA] filled from: "${filters.from}"`);
-    await rand(1000, 1500);
+  // Helper: fill a text field and click its autocomplete suggestion
+  const fillWithAutocomplete = async (label, value) => {
+    // Find input near label text
+    const inputHandle = await page.evaluate((lbl) => {
+      const cells = Array.from(document.querySelectorAll("td"));
+      const labelCell = cells.find(td => td.textContent.trim().startsWith(lbl));
+      const input = labelCell?.nextElementSibling?.querySelector("input");
+      return input ? true : false;
+    }, label);
 
-    // Click autocomplete suggestion if appeared
+    // Use locator with label context
+    const inputs = page.locator("td").filter({ hasText: label }).locator("~ td input").first();
+    const fallback = page.locator(`input[name='from'], input[name='from_city']`).first();
+
+    let filled = false;
     try {
-      await page.waitForSelector("input[name='load_search']", { timeout: 3000 });
-      const sugg = page.locator(`input[name='load_search']`).filter({ hasText: filters.from }).first();
-      const sugg2 = page.locator(`input[name='load_search'][value^='${filters.from}']`).first();
-      const found = await sugg2.count() > 0 ? sugg2 : sugg;
-      if (await found.count() > 0) {
-        await found.click({ force: true });
-        console.log(`[FAFA] clicked from autocomplete`);
-        await rand(500, 800);
-      }
-    } catch (_) { /* no autocomplete, continue */ }
-  }
+      await inputs.fill(value, { timeout: 3000 });
+      filled = true;
+    } catch (_) {
+      try { await fallback.fill(value, { timeout: 3000 }); filled = true; } catch (_2) {}
+    }
 
-  // Fill TO field + handle autocomplete
-  if (filters.to) {
-    const toSel = "input[name='to'], input[name='to_city'], #to_city";
-    await page.fill(toSel, filters.to).catch(() => {});
-    console.log(`[FAFA] filled to: "${filters.to}"`);
-    await rand(1000, 1500);
+    if (!filled) {
+      await page.evaluate((v) => {
+        const all = Array.from(document.querySelectorAll("input[type='text']"));
+        // Find text inputs that are in the search form (not login)
+        for (const inp of all) {
+          if (!inp.value && inp.offsetParent) {
+            inp.value = v;
+            inp.dispatchEvent(new Event("input", { bubbles: true }));
+            break;
+          }
+        }
+      }, value);
+    }
 
+    console.log(`[FAFA] filled ${label}: "${value}", success=${filled}`);
+    await rand(1500, 2000);
+
+    // Click any autocomplete suggestion that appeared
     try {
-      await page.waitForSelector("input[name='load_search']", { timeout: 3000 });
-      const sugg = page.locator(`input[name='load_search'][value^='${filters.to}']`).first();
-      const suggPartial = page.locator(`input[name='load_search']`).first();
-      const found = await sugg.count() > 0 ? sugg : suggPartial;
-      if (await found.count() > 0) {
-        await found.click({ force: true });
-        console.log(`[FAFA] clicked to autocomplete`);
-        await rand(500, 800);
+      await page.waitForSelector("input[name='load_search']", { timeout: 4000 });
+      const sugg = page.locator("input[name='load_search']").first();
+      const count = await sugg.count();
+      if (count > 0) {
+        const suggVal = await sugg.getAttribute("value");
+        await sugg.click({ force: true });
+        console.log(`[FAFA] clicked autocomplete for ${label}: "${suggVal}"`);
+        await rand(600, 1000);
       }
-    } catch (_) { /* no autocomplete */ }
-  }
+    } catch (_) {
+      console.log(`[FAFA] no autocomplete for ${label}`);
+    }
+  };
+
+  if (filters.from) await fillWithAutocomplete("Место погрузки", filters.from);
+  if (filters.to) await fillWithAutocomplete("Место разгрузки", filters.to);
 
   // Select truck type
   if (filters.truck_type) {
@@ -243,8 +260,14 @@ async function fillSearchForm(page) {
     await page.locator("input[name='car_search']").click({ force: true }).catch(() => {});
   }
 
-  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-  await rand(2000, 3000);
+  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+  try {
+    await page.waitForSelector("tr td a", { timeout: 10000 });
+  } catch (_) {
+    console.log("[FAFA] waitForSelector tr td a timed out — proceeding anyway");
+  }
+  await rand(800, 1200);
   console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
 
