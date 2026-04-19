@@ -102,7 +102,7 @@ async function notify(item) {
     `📦 ${item.cargo || "—"}`,
     `⚖ ${item.weight || "—"}`,
     `🕒 ${item.time || "—"}`,
-    filterLine ? `\n${filterLine}` : "",
+    filterLine || "",
   ].filter(l => l !== "").join("\n");
 
   await _bot.telegram.sendMessage(_chatId, text.trim()).catch(e =>

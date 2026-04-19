@@ -137,8 +137,6 @@ async function handleCallback(ctx) {
   console.log(`Callback: action=${action} id=${id.substring(0, 8)} chatId=${chatId}`);
 
   try {
-    await ctx.answerCbQuery();
-
     const msgId = ctx.callbackQuery.message.message_id;
 
     if (action === "fset") {
@@ -155,6 +153,8 @@ async function handleCallback(ctx) {
       }
       return;
     }
+
+    await ctx.answerCbQuery();
 
     if (action === "accept") {
       const lead = await getLeadById(id);
@@ -262,11 +262,11 @@ async function handleMonitor(ctx) {
   try {
     if (isMonitoringActive()) {
       stopMonitoring();
-      await ctx.reply("⏹ Мониторинг della.kz остановлен.");
+      await ctx.reply("⏹ Мониторинг fa-fa.kz остановлен.");
     } else {
       await ctx.reply("▶️ Мониторинг fa-fa.kz запущен. Проверка каждые 3 минуты.");
       startMonitoring().catch(err => {
-        console.error("[DELLA] startMonitoring error:", err.message);
+        console.error("[FAFA] startMonitoring error:", err.message);
         ctx.telegram.sendMessage(MANAGER_CHAT_ID, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
       });
     }
