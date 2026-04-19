@@ -31,8 +31,13 @@ if (process.env.WEBHOOK_DOMAIN) {
   await new Promise((resolve) => app.listen(PORT, resolve));
   console.log(`Server running on port ${PORT}`);
 
-  await bot.telegram.setWebhook(webhookUrl);
-  console.log(`Webhook set: ${webhookUrl}`);
+  try {
+    await bot.telegram.setWebhook(webhookUrl);
+    console.log(`Webhook set: ${webhookUrl}`);
+  } catch (err) {
+    console.error(`Failed to set webhook: ${err.message}`);
+    console.error(`Webhook URL was: "${webhookUrl}"`);
+  }
 } else {
   // Long-polling mode (local dev without ngrok)
   await bot.telegram.deleteWebhook();
