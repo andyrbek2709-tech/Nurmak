@@ -197,14 +197,17 @@ async function fillSearchForm(page) {
 
   console.log(`[FAFA] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
 
-  // Fill input via JS events (triggers fa-fa.kz autocomplete), then pick div.av1
   const typeAndPickSuggestion = async (inputId, value) => {
-    // Remove overlay
     await page.evaluate(() => {
       document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
     });
 
-    // Set value and fire JS events — this is the ONLY approach confirmed to trigger div.av1
+    // Log hidden fields BEFORE to understand form structure
+    const hiddenBefore = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, id: el.id, t: el.type, v: el.value }))
+    );
+    console.log(`[FAFA] inputs before #${inputId}:`, JSON.stringify(hiddenBefore));
+
     await page.evaluate(({ id, v }) => {
       const inp = document.getElementById(id);
       if (!inp) return;
@@ -215,28 +218,83 @@ async function fillSearchForm(page) {
       inp.dispatchEvent(new Event("change", { bubbles: true }));
     }, { id: inputId, v: value });
 
-    // Wait for div.av1 autocomplete dropdown
     try {
       await page.waitForSelector("div.av1", { timeout: 6000 });
     } catch (_) {
       console.log(`[FAFA] #${inputId}: no div.av1 for "${value}"`);
+      return null;
     }
 
-    // Get text of first visible suggestion
-    const picked = await page.evaluate(() => {
-      const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
-      return div ? div.textContent.trim() : null;
-    });
+    // Capture ALL div.av1 elements — text, visibility, data-*, onclick
+    const av1List = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("div.av1")).slice(0, 5).map(d => ({
+        text: d.textContent.trim(),
+        visible: !!d.offsetParent,
+        attrs: Array.from(d.attributes).map(a => `${a.name}=${a.value}`).join("; "),
+        html: d.outerHTML.slice(0, 300),
+      }))
+    );
+    console.log(`[FAFA] div.av1 list:`, JSON.stringify(av1List));
 
-    if (picked) {
-      // Use Playwright native click so site's JS handler sets the hidden City field
-      await page.locator("div.av1").first().click();
-      console.log(`[FAFA] #${inputId} suggestion picked: "${picked}"`);
-    } else {
-      console.log(`[FAFA] #${inputId}: no suggestion for "${value}"`);
+    const visibleAv1 = av1List.find(d => d.visible);
+    if (!visibleAv1) {
+      console.log(`[FAFA] #${inputId}: no visible div.av1`);
+      return null;
     }
 
-    await rand(800, 1000);
+    const picked = visibleAv1.text;
+
+    // Try Playwright native click first (triggers site's JS event handlers)
+    try {
+      await page.locator("div.av1").filter({ hasText: picked.slice(0, 10) }).first().click({ timeout: 3000 });
+    } catch (_) {
+      // Fallback: MouseEvent dispatch
+      await page.evaluate(() => {
+        const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
+        if (div) {
+          div.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+          div.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true }));
+          div.dispatchEvent(new MouseEvent("click",     { bubbles: true }));
+        }
+      });
+    }
+
+    await rand(500, 700);
+
+    // Log hidden fields AFTER click to see what changed
+    const hiddenAfter = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, id: el.id, t: el.type, v: el.value }))
+    );
+    console.log(`[FAFA] inputs after #${inputId}:`, JSON.stringify(hiddenAfter));
+
+    // If the city hidden field was NOT set by the click, extract ID from onclick and set manually
+    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
+    const citySet = hiddenAfter.some(f => f.n === fieldName && f.v);
+    if (!citySet) {
+      // Many autocompletes store the city ID in onclick="setCity(123,'Name')" or data-id="123"
+      const onclickAttr = visibleAv1.attrs.match(/onclick=([^;]+)/)?.[1] || "";
+      const dataIdMatch = visibleAv1.attrs.match(/data-id=(\d+)/);
+      const onclickIdMatch = onclickAttr.match(/\d+/);
+      const cityId = dataIdMatch?.[1] || onclickIdMatch?.[0] || null;
+      if (cityId) {
+        await page.evaluate(({ name, val }) => {
+          let inp = document.querySelector(`input[name="${name}"]`);
+          if (!inp) {
+            inp = document.createElement("input");
+            inp.type = "hidden"; inp.name = name;
+            const form = document.querySelector("form");
+            if (form) form.appendChild(inp);
+          }
+          inp.value = val;
+        }, { name: fieldName, val: cityId });
+        console.log(`[FAFA] #${inputId}: manually set ${fieldName}=${cityId}`);
+      } else {
+        console.log(`[FAFA] #${inputId}: WARNING — ${fieldName} not set, onclick="${onclickAttr}"`);
+      }
+    }
+
+    console.log(`[FAFA] #${inputId} picked: "${picked}"`);
+    await rand(300, 500);
     return picked;
   };
 
