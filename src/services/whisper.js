@@ -1,11 +1,10 @@
-import OpenAI, { toFile } from "openai";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import OpenAI from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/**
- * Download voice file from Telegram and transcribe via Whisper API.
- * Telegram voice messages are .ogg format, supported by Whisper directly.
- */
 export async function transcribeVoice(ctx) {
   const voice = ctx.message.voice || ctx.message.audio;
   if (!voice) return null;
@@ -18,12 +17,17 @@ export async function transcribeVoice(ctx) {
   }
 
   const buffer = Buffer.from(await response.arrayBuffer());
+  const tmpPath = path.join(os.tmpdir(), `voice_${Date.now()}.ogg`);
 
-  const transcription = await openai.audio.transcriptions.create({
-    model: "whisper-1",
-    file: await toFile(buffer, "voice.ogg", { type: "audio/ogg" }),
-    language: "ru",
-  });
-
-  return transcription.text;
+  try {
+    fs.writeFileSync(tmpPath, buffer);
+    const transcription = await openai.audio.transcriptions.create({
+      model: "whisper-1",
+      file: fs.createReadStream(tmpPath),
+      language: "ru",
+    });
+    return transcription.text;
+  } finally {
+    fs.unlinkSync(tmpPath);
+  }
 }
