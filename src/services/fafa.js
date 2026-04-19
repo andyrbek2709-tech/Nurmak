@@ -136,21 +136,32 @@ async function scrape() {
     const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
     if (!hasAuth) await doLogin(page);
 
-    // Try known cargo page paths for fa-fa.kz
-    const cargoPaths = ["/cargoes/", "/cargo/", "/cargos/", "/gruz/", "/zayvki/", "/loads/", "/"];
-    let loaded = false;
-    for (const path of cargoPaths) {
-      try {
-        const resp = await page.goto(`${FAFA_URL}${path}`, { waitUntil: "domcontentloaded", timeout: 15000 });
-        const status = resp?.status();
-        console.log(`[FAFA] tried ${path} → status ${status}`);
-        if (resp && resp.ok()) { loaded = true; break; }
-      } catch (_) { /* try next */ }
-      await rand(500, 800);
-    }
+    // Try to find "НАЙТИ ГРУЗ" link in navigation and follow it
+    const cargoLink = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll("a"));
+      const match = links.find(a =>
+        /найти\s*груз|поиск\s*груз|cargo|cargoes|грузы/i.test(a.textContent) ||
+        /\/cargoes|\/cargo|\/gruz|\/search/i.test(a.href)
+      );
+      return match ? { href: match.href, text: match.textContent.trim() } : null;
+    });
 
-    if (!loaded) {
-      console.log("[FAFA] Could not find cargo page, current URL:", page.url());
+    if (cargoLink) {
+      console.log(`[FAFA] found cargo link: "${cargoLink.text}" → ${cargoLink.href}`);
+      await page.goto(cargoLink.href, { waitUntil: "domcontentloaded", timeout: 20000 });
+      await rand(1500, 2500);
+    } else {
+      // Fallback: try known paths
+      const cargoPaths = ["/cargoes/", "/cargo/", "/gruz/", "/search/"];
+      for (const path of cargoPaths) {
+        try {
+          const resp = await page.goto(`${FAFA_URL}${path}`, { waitUntil: "domcontentloaded", timeout: 15000 });
+          const status = resp?.status();
+          console.log(`[FAFA] tried ${path} → status ${status}`);
+          if (resp && resp.ok()) break;
+        } catch (_) { /* try next */ }
+        await rand(500, 800);
+      }
     }
 
     await rand(2000, 3000);
@@ -264,6 +275,17 @@ async function extractItems(page) {
         weight: getText(row, ["[class*='weight']", "[class*='mass']", "[class*='вес']"]) || cells[4] || "",
         time: getText(row, ["[class*='date']", "[class*='time']", "[class*='created']", "[class*='дата']"]) || cells[0] || "",
       };
-    }).filter(i => i.from || i.to || i.cargo);
+    }).filter(i => {
+      // Filter out navigation/UI garbage
+      const text = `${i.from} ${i.to} ${i.cargo}`;
+      if (!i.from && !i.to && !i.cargo) return false;
+      if (text.length < 5) return false;
+      // Skip obviously navigation items
+      const junk = /закрыть|меню|пароль|copyright|соглашение|конфиденц|найти|онлайн|консультант|ошибка 404|карта сайта|автосайт/i;
+      if (junk.test(text)) return false;
+      // Require at least from or to to look like a real city (3+ chars)
+      const hasCity = (i.from?.length >= 3) || (i.to?.length >= 3);
+      return hasCity;
+    });
   });
 }
