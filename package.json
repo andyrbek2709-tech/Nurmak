@@ -6,13 +6,15 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "postinstall": "playwright install --with-deps chromium"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
     "openai": "^6.34.0",
     "@supabase/supabase-js": "^2.103.3",
     "express": "^4.21.0",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "playwright": "^1.44.0"
   }
 }

@@ -6,6 +6,7 @@ import {
   getLeadsByStatus, getLeadsToday, normalizePhone,
 } from "../services/supabase.js";
 import { getUser, upsertUser } from "../services/users.js";
+import { initDella, startMonitoring, stopMonitoring, isMonitoringActive } from "../services/della.js";
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
 
@@ -16,6 +17,8 @@ const reminders = new Map();
 export function registerHandlers(bot) {
   _bot = bot;
 
+  initDella(bot, MANAGER_CHAT_ID);
+
   bot.start(handleStart);
   bot.on("text", handleText);
   bot.on("voice", handleVoice);
@@ -23,6 +26,7 @@ export function registerHandlers(bot) {
   bot.command("new", (ctx) => handleOwnerList(ctx, "new", "🆕 Новые заявки"));
   bot.command("active", (ctx) => handleOwnerList(ctx, "in_progress", "🔄 В работе"));
   bot.command("today", handleOwnerToday);
+  bot.command("monitor", handleMonitor);
 
   bot.on("callback_query", handleCallback);
 }
@@ -191,6 +195,32 @@ async function handleOwnerToday(ctx) {
     await ctx.reply(`За сегодня (${leads.length}):\n\n${lines.join("\n")}`);
   } catch (err) {
     console.error("Today error:", err.message);
+  }
+}
+
+async function handleMonitor(ctx) {
+  const chatId = String(ctx.chat.id);
+  const allowed = String(MANAGER_CHAT_ID);
+
+  if (chatId !== allowed) {
+    await ctx.reply("Нет доступа.");
+    return;
+  }
+
+  try {
+    if (isMonitoringActive()) {
+      stopMonitoring();
+      await ctx.reply("⏹ Мониторинг della.kz остановлен.");
+    } else {
+      await ctx.reply("▶️ Мониторинг della.kz запущен. Проверка каждые 3 минуты.");
+      startMonitoring().catch(err => {
+        console.error("[DELLA] startMonitoring error:", err.message);
+        ctx.telegram.sendMessage(MANAGER_CHAT_ID, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
+      });
+    }
+  } catch (err) {
+    console.error("Monitor command error:", err.message);
+    await ctx.reply(`❌ Ошибка: ${err.message}`);
   }
 }
 
