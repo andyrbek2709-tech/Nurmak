@@ -3,8 +3,7 @@ import express from "express";
 import { Telegraf } from "telegraf";
 import { handleStart, handleText, handleVoice } from "./bot/handlers.js";
 
-// Validate required env vars
-const required = ["BOT_TOKEN", "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "MANAGER_CHAT_ID", "WEBHOOK_DOMAIN"];
+const required = ["BOT_TOKEN", "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "MANAGER_CHAT_ID"];
 for (const key of required) {
   if (!process.env[key]) {
     console.error(`Missing required env var: ${key}`);
@@ -13,39 +12,38 @@ for (const key of required) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Register bot handlers
 bot.start(handleStart);
 bot.on("text", handleText);
 bot.on("voice", handleVoice);
 
-// Health check endpoint for Railway
-app.get("/health", (_req, res) => {
-  res.send("OK");
-});
+if (process.env.WEBHOOK_DOMAIN) {
+  // Webhook mode (Railway / production)
+  const app = express();
+  const webhookPath = `/webhook/${process.env.BOT_TOKEN}`;
 
-// Webhook endpoint for Telegram
-const webhookPath = `/webhook/${process.env.BOT_TOKEN}`;
-app.use(bot.webhookCallback(webhookPath));
+  app.get("/health", (_req, res) => res.send("OK"));
+  app.use(bot.webhookCallback(webhookPath));
 
-// Set webhook on startup
-const webhookUrl = `${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
-
-bot.telegram.setWebhook(webhookUrl).then(() => {
+  const webhookUrl = `${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
+  await bot.telegram.setWebhook(webhookUrl);
   console.log(`Webhook set: ${webhookUrl}`);
-}).catch((err) => {
-  console.error("Failed to set webhook:", err.message);
-});
 
-// Start Express server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+} else {
+  // Long-polling mode (local dev without ngrok)
+  await bot.telegram.deleteWebhook();
+  bot.launch();
+  console.log("Bot started in long-polling mode");
+}
 
-// Graceful shutdown
 process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down...");
+  bot.stop("SIGTERM");
+  process.exit(0);
+});
+
+process.on("SIGINT", () => {
+  bot.stop("SIGINT");
   process.exit(0);
 });
