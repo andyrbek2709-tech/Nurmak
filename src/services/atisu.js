@@ -340,17 +340,31 @@ async function extractItems(page) {
       return true;
     });
 
-    // Debug: show first row container content
-    const debugRow = dirEls[0] ? (() => {
-      const r = findRowContainer(dirEls[0]);
-      return r ? (r.innerText || "").slice(0, 300) : "no container";
-    })() : "no dirEls";
+    // Debug: show first row container content + leaf texts + ancestor chain
+    const debugInfo = (() => {
+      if (!dirEls[0]) return { rowSample: "no dirEls", leafs: [], chain: [] };
+      const el = dirEls[0];
+      // Ancestor text lengths
+      const chain = [];
+      let cur = el.parentElement;
+      for (let d = 0; d < 20 && cur; d++, cur = cur.parentElement) {
+        chain.push({ d, tag: cur.tagName, len: (cur.innerText || "").length, hasKm: (cur.innerText || "").includes("км") });
+      }
+      const r = findRowContainer(el);
+      if (!r) return { rowSample: "no container (maxLen/no-km)", leafs: [], chain };
+      const leafArr = Array.from(r.querySelectorAll("*"))
+        .filter(e => e.children.length === 0 && (e.innerText || "").trim())
+        .map(e => (e.innerText || "").trim()).filter(Boolean);
+      return { rowSample: (r.innerText || "").slice(0, 300), leafs: leafArr.slice(0, 20), chain };
+    })();
 
-    return { items: deduped, debug: { dirEls: dirEls.length, results: results.length, rowSample: debugRow } };
+    return { items: deduped, debug: { dirEls: dirEls.length, results: results.length, rowSample: debugInfo.rowSample, leafs: debugInfo.leafs, chain: debugInfo.chain } };
   });
 
   console.log(`[ATISU] dirEls=${debug.dirEls} parsed=${debug.results} deduped=${items.length}`);
   console.log(`[ATISU] row[0]:`, debug.rowSample);
+  console.log(`[ATISU] leafs[0]:`, JSON.stringify(debug.leafs));
+  console.log(`[ATISU] chain[0]:`, JSON.stringify(debug.chain?.slice(0, 8)));
   items.slice(0, 3).forEach((it, i) =>
     console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
   );
