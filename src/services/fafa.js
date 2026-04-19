@@ -180,12 +180,18 @@ async function doLogin(page) {
   await page.fill("input[type='password'], input[name='password'], #password", password).catch(() => {});
   await rand(500, 900);
 
-  // Force click handles elements outside viewport
-  const submitBtn = await page.$("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button").catch(() => null);
-  if (submitBtn) {
-    await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-    await submitBtn.click({ force: true }).catch(() => {});
+  // Click via JS to bypass Playwright's viewport/visibility checks
+  const clicked = await page.evaluate(() => {
+    const btn = document.querySelector("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button");
+    if (btn) { btn.click(); return true; }
+    return false;
+  });
+
+  if (!clicked) {
+    // Fallback: press Enter in password field
+    await page.press("input[type='password'], input[name='password'], #password", "Enter").catch(() => {});
   }
+
   await page.waitForLoadState("domcontentloaded");
   await rand(2000, 3000);
   console.log(`[FAFA] login done, URL: ${page.url()}`);
