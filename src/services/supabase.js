@@ -10,7 +10,9 @@ export function normalizePhone(phone) {
 function buildRow(leadData) {
   return {
     from_city: leadData.from || null,
+    from_address: leadData.from_address || null,
     to_city: leadData.to || null,
+    to_address: leadData.to_address || null,
     cargo: leadData.cargo || null,
     weight: leadData.weight || null,
     volume: leadData.volume || null,

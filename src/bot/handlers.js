@@ -36,6 +36,8 @@ function formatNotification(lead) {
     `🆔 ID: ${short}`,
     ``,
     `📍 Маршрут: ${lead.from_city || "—"} → ${lead.to_city || "—"}`,
+    `📌 Адрес загрузки: ${lead.from_address || "—"}`,
+    `📌 Адрес разгрузки: ${lead.to_address || "—"}`,
     `📦 Груз: ${lead.cargo || "—"}`,
     `Вес: ${lead.weight || "—"}`,
     `Объём: ${lead.volume || "—"}`,
