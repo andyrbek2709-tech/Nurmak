@@ -256,7 +256,7 @@ async function processMessage(ctx, chatId, userText) {
       await ctx.reply(result.content);
     }
   } catch (err) {
-    console.error("Processing error:", err.message);
+    console.error("Processing error:", err.message, err.stack);
     await ctx.reply("Что-то пошло не так, давайте попробуем ещё раз.");
   }
 }
