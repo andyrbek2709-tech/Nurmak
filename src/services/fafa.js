@@ -170,7 +170,14 @@ async function scrape() {
     await rand(2000, 3000);
     console.log(`[FAFA] scraping URL: ${page.url()}, title: ${await page.title()}`);
 
-    return await extractItems(page);
+    const items = await extractItems(page);
+
+    // Log first 5 items for debugging selectors
+    items.slice(0, 5).forEach((it, i) =>
+      console.log(`[FAFA] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" weight="${it.weight}" time="${it.time}"`)
+    );
+
+    return items;
   } finally {
     await browser.close();
   }
