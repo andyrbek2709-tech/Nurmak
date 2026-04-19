@@ -26,7 +26,7 @@ if (process.env.WEBHOOK_DOMAIN) {
   app.get("/health", (_req, res) => res.send("OK"));
   app.use(bot.webhookCallback(webhookPath));
 
-  const webhookUrl = `${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
+  const webhookUrl = `${process.env.WEBHOOK_DOMAIN.trim()}${webhookPath}`;
 
   await new Promise((resolve) => app.listen(PORT, resolve));
   console.log(`Server running on port ${PORT}`);
