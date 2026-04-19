@@ -176,82 +176,76 @@ async function scrape() {
 
 async function fillSearchForm(page) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
-  if (!hasFilters) return; // no filters → scrape all, local filter will match everything
+  if (!hasFilters) return;
 
-  const submitted = await page.evaluate(({ from, to, truckType }) => {
-    const fire = (el, val) => {
-      el.value = val;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    };
+  // Fill FROM field + handle autocomplete
+  if (filters.from) {
+    const fromSel = "input[name='from'], input[name='from_city'], #from_city";
+    await page.fill(fromSel, filters.from).catch(() => {});
+    console.log(`[FAFA] filled from: "${filters.from}"`);
+    await rand(1000, 1500);
 
-    // Find inputs by label text
-    const allLabels = Array.from(document.querySelectorAll("label, td, th"));
-    const findInputNear = (labelText) => {
-      for (const el of allLabels) {
-        if (el.textContent.trim().includes(labelText)) {
-          const next = el.nextElementSibling || el.parentElement?.nextElementSibling;
-          const input = next?.querySelector("input") || next?.querySelector("select");
-          if (input) return input;
-          // Try sibling td
-          const sibling = el.closest("td")?.nextElementSibling?.querySelector("input");
-          if (sibling) return sibling;
-        }
+    // Click autocomplete suggestion if appeared
+    try {
+      await page.waitForSelector("input[name='load_search']", { timeout: 3000 });
+      const sugg = page.locator(`input[name='load_search']`).filter({ hasText: filters.from }).first();
+      const sugg2 = page.locator(`input[name='load_search'][value^='${filters.from}']`).first();
+      const found = await sugg2.count() > 0 ? sugg2 : sugg;
+      if (await found.count() > 0) {
+        await found.click({ force: true });
+        console.log(`[FAFA] clicked from autocomplete`);
+        await rand(500, 800);
       }
-      return null;
-    };
+    } catch (_) { /* no autocomplete, continue */ }
+  }
 
-    let filled = [];
+  // Fill TO field + handle autocomplete
+  if (filters.to) {
+    const toSel = "input[name='to'], input[name='to_city'], #to_city";
+    await page.fill(toSel, filters.to).catch(() => {});
+    console.log(`[FAFA] filled to: "${filters.to}"`);
+    await rand(1000, 1500);
 
-    if (from) {
-      const inp = document.querySelector("input[name='from'], input[name='from_city'], #from_city")
-        || findInputNear("погрузки");
-      if (inp) { fire(inp, from); filled.push("from=" + from); }
-    }
+    try {
+      await page.waitForSelector("input[name='load_search']", { timeout: 3000 });
+      const sugg = page.locator(`input[name='load_search'][value^='${filters.to}']`).first();
+      const suggPartial = page.locator(`input[name='load_search']`).first();
+      const found = await sugg.count() > 0 ? sugg : suggPartial;
+      if (await found.count() > 0) {
+        await found.click({ force: true });
+        console.log(`[FAFA] clicked to autocomplete`);
+        await rand(500, 800);
+      }
+    } catch (_) { /* no autocomplete */ }
+  }
 
-    if (to) {
-      const inp = document.querySelector("input[name='to'], input[name='to_city'], #to_city")
-        || findInputNear("разгрузки");
-      if (inp) { fire(inp, to); filled.push("to=" + to); }
-    }
-
-    if (truckType) {
+  // Select truck type
+  if (filters.truck_type) {
+    await page.evaluate((truckType) => {
       const sel = document.querySelector("select[name='car_type'], select");
-      if (sel) {
-        const opt = Array.from(sel.options).find(o =>
-          o.text.toLowerCase().includes(truckType.toLowerCase())
-        );
-        if (opt) { sel.value = opt.value; filled.push("truck=" + truckType); }
-      }
-    }
+      if (!sel) return;
+      const opt = Array.from(sel.options).find(o =>
+        o.text.toLowerCase().includes(truckType.toLowerCase())
+      );
+      if (opt) sel.value = opt.value;
+    }, filters.truck_type).catch(() => {});
+  }
 
-    // Debug: log all submit buttons
-    const btns = Array.from(document.querySelectorAll("input[type='submit'], button[type='submit'], button, input[type='button']"))
-      .map(b => `[${b.tagName} type=${b.type} value="${b.value}" name="${b.name}"]`).join(" ");
+  // Click the REAL search button (not autocomplete suggestions)
+  const clicked = await page.evaluate(() => {
+    const btn = document.querySelector("input[name='car_search']");
+    if (btn) { btn.click(); return `input[name=car_search] value="${btn.value}"`; }
+    return null;
+  });
+  console.log(`[FAFA] search submit: ${clicked}`);
 
-    // Try to submit: find by value text first, then any submit, then form.submit()
-    const submitBtn =
-      document.querySelector("input[value*='скат'], input[value*='айти']") ||
-      document.querySelector("input[type='submit'], button[type='submit']");
+  if (!clicked) {
+    await page.locator("input[name='car_search']").click({ force: true }).catch(() => {});
+  }
 
-    if (submitBtn) {
-      submitBtn.click();
-      return `clicked "${submitBtn.value || submitBtn.textContent}" | filled: ${filled.join(", ")} | btns: ${btns}`;
-    }
-
-    // Last resort: submit form containing from/to input
-    const anyInput = document.querySelector("input[name='from'], input[name='to']");
-    if (anyInput?.form) {
-      anyInput.form.submit();
-      return `form.submit() | filled: ${filled.join(", ")}`;
-    }
-
-    return `no submit btn | filled: ${filled.join(", ")} | btns: ${btns}`;
-  }, { from: filters.from, to: filters.to, truckType: filters.truck_type });
-
-  console.log(`[FAFA] search form: ${submitted}`);
   await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-  await rand(1500, 2500);
+  await rand(2000, 3000);
+  console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
 
 async function doLogin(page) {
