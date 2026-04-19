@@ -65,7 +65,11 @@ function buildKeyboard(lead) {
       { text: "✅ Принять", callback_data: `accept:${id}` },
       { text: "❌ Отклонить", callback_data: `reject:${id}` },
     ],
-    [{ text: "⏸ Отложить", callback_data: `delay:${id}` }],
+    [
+      { text: "⏱ 5 мин", callback_data: `delay5:${id}` },
+      { text: "⏱ 15 мин", callback_data: `delay15:${id}` },
+      { text: "⏱ 30 мин", callback_data: `delay30:${id}` },
+    ],
   ];
 
   if (phone) {
@@ -140,10 +144,11 @@ async function handleCallback(ctx) {
       cancelReminder(id);
       await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
       await ctx.telegram.sendMessage(chatId, `❌ Заявка ${id.substring(0, 8)} отклонена.`);
-    } else if (action === "delay") {
+    } else if (action === "delay5" || action === "delay15" || action === "delay30") {
+      const minutes = action === "delay5" ? 5 : action === "delay15" ? 15 : 30;
       await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
-      await ctx.telegram.sendMessage(chatId, `⏸ Отложено. Напомним через 30 минут, затем каждые 5 минут.`);
-      scheduleReminder(id, 30 * 60 * 1000); // pause 30 min, then repeat every 5 min
+      await ctx.telegram.sendMessage(chatId, `⏱ Напомним через ${minutes} минут.`);
+      scheduleReminder(id, minutes * 60 * 1000);
     }
   } catch (err) {
     console.error("Callback error:", err.message, err.stack);
