@@ -225,12 +225,28 @@ async function fillSearchForm(page) {
       }
     }
 
-    // Submit search form
-    const btn = Array.from(document.querySelectorAll("input[type='submit'], button[type='submit']"))
-      .find(b => /искать|найти|search/i.test(b.value + b.textContent));
-    if (btn) { btn.click(); return "submitted: " + filled.join(", "); }
+    // Debug: log all submit buttons
+    const btns = Array.from(document.querySelectorAll("input[type='submit'], button[type='submit'], button, input[type='button']"))
+      .map(b => `[${b.tagName} type=${b.type} value="${b.value}" name="${b.name}"]`).join(" ");
 
-    return "no submit btn, filled: " + filled.join(", ");
+    // Try to submit: find by value text first, then any submit, then form.submit()
+    const submitBtn =
+      document.querySelector("input[value*='скат'], input[value*='айти']") ||
+      document.querySelector("input[type='submit'], button[type='submit']");
+
+    if (submitBtn) {
+      submitBtn.click();
+      return `clicked "${submitBtn.value || submitBtn.textContent}" | filled: ${filled.join(", ")} | btns: ${btns}`;
+    }
+
+    // Last resort: submit form containing from/to input
+    const anyInput = document.querySelector("input[name='from'], input[name='to']");
+    if (anyInput?.form) {
+      anyInput.form.submit();
+      return `form.submit() | filled: ${filled.join(", ")}`;
+    }
+
+    return `no submit btn | filled: ${filled.join(", ")} | btns: ${btns}`;
   }, { from: filters.from, to: filters.to, truckType: filters.truck_type });
 
   console.log(`[FAFA] search form: ${submitted}`);
