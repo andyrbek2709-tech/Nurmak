@@ -3,7 +3,6 @@ import {
   getLeadsByStatus, getLeadsToday,
 } from "../services/supabase.js";
 import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters, runOnce, buildMessage } from "../services/fafa.js";
-import { initAtisu, startAtisuMonitoring, stopAtisuMonitoring, isAtisuMonitoringActive, getAtisuFilters, setAtisuFilter, clearAtisuFilters, runAtisuOnce, buildAtisuMessage } from "../services/atisu.js";
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
 
@@ -15,7 +14,6 @@ export function registerHandlers(bot) {
   _bot = bot;
 
   initFafa(bot);
-  initAtisu(bot);
 
   bot.start(handleStart);
 
@@ -26,7 +24,6 @@ export function registerHandlers(bot) {
   bot.command("monitor", handleMonitor);
   bot.command("filter", handleFilter);
   bot.command("search", handleSearchOnce);
-  bot.command("atisu", handleAtisuFilter);
   bot.command("help", handleHelp);
 
   bot.on("text", handleText);
@@ -87,11 +84,6 @@ async function handleCallback(ctx) {
 
   try {
     const msgId = ctx.callbackQuery.message.message_id;
-
-    if (action === "atisu") {
-      await handleAtisuCallback(ctx, chatId, id);
-      return;
-    }
 
     if (action === "fset") {
       const field = id;
@@ -209,7 +201,7 @@ async function buildFilterText(chatId) {
   const f = await getFilters(chatId);
   const isActive = await isMonitoringActive(chatId);
   return [
-    `⚙️ Фильтры поиска FA-FA:`,
+    `⚙️ Фильтры поиска (FA-FA.KZ + ATI.SU):`,
     ``,
     `🗺 Откуда: ${f.from || "любой"}`,
     `🗺 Куда: ${f.to || "любой"}`,
@@ -280,15 +272,11 @@ async function handleHelp(ctx) {
   await ctx.reply([
     `📖 Команды бота`,
     ``,
-    `━━━ FA-FA.KZ ━━━`,
-    `/filter — фильтры + мониторинг FA-FA`,
-    `/search — разовый поиск FA-FA`,
+    `/filter — фильтры и мониторинг (FA-FA.KZ + ATI.SU)`,
+    `/search — разовый поиск по обоим сайтам`,
     ``,
-    `━━━ ATI.SU ━━━`,
-    `/atisu — фильтры + мониторинг ATI.SU`,
-    ``,
-    `Оба бота: проверка каждые 5 мин`,
-    `Новый груз — сразу. Тишина — раз в час "нет новых".`,
+    `Проверка каждые 5 мин. Новый груз — сразу.`,
+    `Если ничего нового — раз в час "нет новых".`,
     `Напишите - (минус) чтобы убрать фильтр.`,
   ].join("\n"));
 }
@@ -298,9 +286,8 @@ async function handleHelp(ctx) {
 export async function handleStart(ctx) {
   await ctx.reply(
     "Добрый день! 👋\n\n" +
-    "Я ищу грузы на FA-FA.KZ и ATI.SU.\n\n" +
-    "/filter — поиск и мониторинг FA-FA.KZ\n" +
-    "/atisu — поиск и мониторинг ATI.SU\n" +
+    "Я ищу грузы на FA-FA.KZ и ATI.SU одновременно.\n\n" +
+    "/filter — поиск и мониторинг\n" +
     "/help — все команды"
   );
 }
@@ -325,111 +312,11 @@ export async function handleText(ctx) {
     return;
   }
 
-  // ATI.SU filter input
-  const atisuAwaitField = atisuFilterAwait.get(chatId);
-  if (atisuAwaitField) {
-    atisuFilterAwait.delete(chatId);
-    const value = userMessage.trim() === "-" ? null : userMessage.trim();
-    await setAtisuFilter(chatId, atisuAwaitField, value);
-    const labels = { from: "Откуда", to: "Куда" };
-    const isActive = await isAtisuMonitoringActive(chatId);
-    await ctx.reply(
-      `${value ? `✅ ATI.SU фильтр «${labels[atisuAwaitField]}» установлен: ${value}` : `✅ ATI.SU фильтр «${labels[atisuAwaitField]}» убран`}\n\n${await buildAtisuFilterText(chatId)}`,
-      { reply_markup: buildAtisuFilterKeyboard(isActive) }
-    );
-    return;
-  }
-
-  await ctx.reply("Используйте /filter (FA-FA) или /atisu (ATI.SU) для поиска грузов.");
+  await ctx.reply("Используйте /filter для поиска грузов.");
 }
 
 export async function handleVoice(ctx) {
   await ctx.reply("Голосовые сообщения не поддерживаются. Используйте /filter для поиска грузов.");
 }
 
-// ─── ATI.SU handlers ──────────────────────────────────────────────────────────
-
-const atisuFilterAwait = new Map(); // chatId → "from" | "to"
-
-async function buildAtisuFilterText(chatId) {
-  const f = await getAtisuFilters(chatId);
-  const isActive = await isAtisuMonitoringActive(chatId);
-  return [
-    `⚙️ Фильтры поиска ATI.SU:`,
-    ``,
-    `🗺 Откуда: ${f.from || "любой"}`,
-    `🗺 Куда: ${f.to || "любой"}`,
-    ``,
-    isActive ? `🟢 Мониторинг активен` : `⚫️ Мониторинг выключен`,
-  ].join("\n");
-}
-
-function buildAtisuFilterKeyboard(isActive = false) {
-  return {
-    inline_keyboard: [
-      [
-        { text: "✏️ Откуда", callback_data: "atisu:from" },
-        { text: "✏️ Куда",   callback_data: "atisu:to"   },
-      ],
-      [
-        { text: "🔍 Найти сейчас", callback_data: "atisu:search" },
-        { text: "🗑 Сбросить",     callback_data: "atisu:clear"  },
-      ],
-      [
-        { text: isActive ? "⏹ Остановить мониторинг" : "▶️ Мониторинг каждые 5 мин", callback_data: "atisu:monitor" },
-      ],
-    ],
-  };
-}
-
-async function handleAtisuFilter(ctx) {
-  const chatId = String(ctx.chat.id);
-  const isActive = await isAtisuMonitoringActive(chatId);
-  await ctx.reply(await buildAtisuFilterText(chatId), { reply_markup: buildAtisuFilterKeyboard(isActive) });
-}
-
-async function handleAtisuCallback(ctx, chatId, field) {
-  if (field === "clear") {
-    await clearAtisuFilters(chatId);
-    await ctx.answerCbQuery("Фильтры сброшены");
-    const isActive = await isAtisuMonitoringActive(chatId);
-    await ctx.editMessageText(await buildAtisuFilterText(chatId), { reply_markup: buildAtisuFilterKeyboard(isActive) });
-  } else if (field === "search") {
-    await ctx.answerCbQuery("Ищу...");
-    await ctx.reply("🔍 Запускаю поиск ATI.SU...");
-    runAtisuOnce(chatId).then(async (items) => {
-      if (!items.length) {
-        await ctx.telegram.sendMessage(chatId, "ATI.SU: по вашим фильтрам ничего не найдено.");
-        return;
-      }
-      for (const item of items) {
-        await ctx.telegram.sendMessage(chatId, buildAtisuMessage(item)).catch(() => {});
-      }
-      await ctx.telegram.sendMessage(chatId, `✅ ATI.SU: найдено ${items.length} заявок.`);
-    }).catch(async (err) => {
-      await ctx.telegram.sendMessage(chatId, `❌ ATI.SU ошибка: ${err.message}`).catch(() => {});
-    });
-  } else if (field === "monitor") {
-    const isActive = await isAtisuMonitoringActive(chatId);
-    if (isActive) {
-      await stopAtisuMonitoring(chatId);
-      await ctx.answerCbQuery("Мониторинг остановлен");
-    } else {
-      await ctx.answerCbQuery("Мониторинг запущен!");
-      await ctx.reply("▶️ ATI.SU мониторинг запущен. Проверка каждые 5 минут.");
-      startAtisuMonitoring(chatId).catch(err => {
-        console.error("[ATISU] startMonitoring error:", err.message);
-        ctx.telegram.sendMessage(chatId, `❌ ATI.SU ошибка: ${err.message}`).catch(() => {});
-      });
-    }
-    const nowActive = await isAtisuMonitoringActive(chatId);
-    await ctx.editMessageText(await buildAtisuFilterText(chatId), { reply_markup: buildAtisuFilterKeyboard(nowActive) }).catch(() => {});
-  } else {
-    // from / to — ждём текстового ввода
-    atisuFilterAwait.set(chatId, field);
-    await ctx.answerCbQuery();
-    const labels = { from: "Откуда (город или страна)", to: "Куда (город или страна)" };
-    await ctx.reply(`Напишите значение для «${labels[field]}» (или «-» чтобы убрать):`);
-  }
-}
 

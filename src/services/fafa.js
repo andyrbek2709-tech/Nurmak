@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import { loadBotSetting, saveBotSetting } from "./supabase.js";
+import { scrapeAtisu } from "./atisu.js";
 
 const FAFA_URL = "https://fa-fa.kz";
 const SEARCH_URL = `${FAFA_URL}/search_load/`;
@@ -123,7 +124,7 @@ function matchesFilters(item, filters) {
 // ─── Tick / notify ────────────────────────────────────────────────────────────
 
 function makeKey(item) {
-  return `${item.from}|${item.to}|${item.cargo}|${item.time}`
+  return `${item.source || ""}|${item.from}|${item.to}|${item.cargo}|${item.time}`
     .toLowerCase().replace(/\s+/g, "");
 }
 
@@ -167,7 +168,8 @@ async function notify(item, chatId, isNew = false) {
 }
 
 export function buildMessage(item, opts = {}) {
-  const header = opts.isNew ? "🆕 Новое направление (FA-FA)" : "🚛 Заявка FA-FA";
+  const site = item.source === "atisu" ? "ATI.SU" : "FA-FA.KZ";
+  const header = opts.isNew ? `🆕 Новое направление (${site})` : `🚛 Заявка ${site}`;
   const distPart = item.distance ? ` (${item.distance})` : "";
   return [
     header,
@@ -187,6 +189,23 @@ function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 function rand(min, max) { return delay(Math.floor(min + Math.random() * (max - min))); }
 
 async function scrape(filters) {
+  const [fafaResult, atisuResult] = await Promise.allSettled([
+    scrapeFafa(filters),
+    scrapeAtisu(filters),
+  ]);
+  const items = [];
+  if (fafaResult.status === "fulfilled")
+    items.push(...fafaResult.value.map(i => ({ ...i, source: "fafa" })));
+  else
+    console.error("[SCRAPE] fafa error:", fafaResult.reason?.message);
+  if (atisuResult.status === "fulfilled")
+    items.push(...atisuResult.value.map(i => ({ ...i, source: "atisu" })));
+  else
+    console.error("[SCRAPE] atisu error:", atisuResult.reason?.message);
+  return items;
+}
+
+async function scrapeFafa(filters) {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
