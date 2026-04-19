@@ -167,51 +167,57 @@ async function doLogin(page) {
 
   console.log(`[FAFA] login start, URL: ${page.url()}`);
 
-  // Log what inputs are visible on page
-  const inputInfo = await page.evaluate(() => {
-    return Array.from(document.querySelectorAll("input")).map(i =>
-      `type=${i.type} name=${i.name} id=${i.id} class=${i.className}`
-    ).join(" | ");
-  });
-  console.log(`[FAFA] inputs found: ${inputInfo || "none"}`);
+  // Debug: log all inputs on page
+  const inputInfo = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("input"))
+      .map(i => `type=${i.type} name=${i.name} id=${i.id}`)
+      .join(" | ")
+  );
+  console.log(`[FAFA] inputs: ${inputInfo || "none"}`);
 
-  // Click login link if present
+  // Click login link if present (navigate to login page)
   const loginLink = await page.$("a[href*='login'], a[href*='signin'], a[href*='enter'], .login-btn, .btn-login").catch(() => null);
   if (loginLink) {
-    console.log("[FAFA] clicking login link...");
-    await loginLink.click();
+    await page.evaluate(el => el.click(), loginLink); // JS click to avoid viewport issues
     await rand(1000, 1500);
-    console.log(`[FAFA] after login link, URL: ${page.url()}`);
+    console.log(`[FAFA] after login link click, URL: ${page.url()}`);
   }
 
-  // Fill login
-  const loginFilled = await page.evaluate((val) => {
-    const input = document.querySelector("input[name='login'], input[name='email'], input[name='username'], input[type='email'], #login, #email");
-    if (input) { input.value = val; input.dispatchEvent(new Event("input", { bubbles: true })); return input.name || input.type; }
-    return null;
-  }, login);
-  console.log(`[FAFA] login field filled: ${loginFilled}`);
-  await rand(500, 900);
+  // Fill fields via JS evaluate — avoids all Playwright viewport/actionability checks
+  await page.evaluate(({ l, p }) => {
+    const loginInput = document.querySelector(
+      "input[name='login'], input[name='email'], input[name='username'], input[type='email'], #login, #email"
+    );
+    const passInput = document.querySelector(
+      "input[type='password'], input[name='password'], #password"
+    );
+    const fire = (el, val) => {
+      el.focus();
+      el.value = val;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    if (loginInput) fire(loginInput, l);
+    if (passInput) fire(passInput, p);
+  }, { l: login, p: password });
 
-  // Fill password
-  const passFilled = await page.evaluate((val) => {
-    const input = document.querySelector("input[type='password'], input[name='password'], #password");
-    if (input) { input.value = val; input.dispatchEvent(new Event("input", { bubbles: true })); return "password"; }
-    return null;
-  }, password);
-  console.log(`[FAFA] password field filled: ${passFilled}`);
-  await rand(500, 900);
+  console.log("[FAFA] credentials filled");
+  await rand(800, 1200);
 
-  // Click submit via JS
-  const clicked = await page.evaluate(() => {
-    const btn = document.querySelector("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button");
-    if (btn) { btn.click(); return btn.tagName + " " + (btn.className || btn.type); }
+  // Submit: try form.submit() first (most reliable, bypasses all viewport issues)
+  const submitted = await page.evaluate(() => {
+    const form = document.querySelector("form");
+    if (form) { form.submit(); return "form.submit()"; }
+    // Fallback: JS click on button
+    const btn = document.querySelector("button[type='submit'], input[type='submit'], form button");
+    if (btn) { btn.click(); return "btn.click()"; }
     return null;
   });
-  console.log(`[FAFA] submit clicked: ${clicked}`);
+  console.log(`[FAFA] submit method: ${submitted}`);
 
-  if (!clicked) {
-    await page.keyboard.press("Enter").catch(() => {});
+  // Fallback: Enter key on password field via locator
+  if (!submitted) {
+    await page.locator("input[type='password'], input[name='password']").press("Enter").catch(() => {});
     console.log("[FAFA] fallback: pressed Enter");
   }
 
