@@ -228,7 +228,20 @@ async function fillSearchForm(page) {
       divs[0].click();
       return divs[0].textContent.trim();
     });
-    console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
+
+    if (!picked) {
+      // No city suggestion found — clear the input so form submits without this field
+      await page.evaluate((id) => {
+        const inp = document.getElementById(id);
+        if (!inp) return;
+        inp.value = "";
+        inp.dispatchEvent(new Event("change", { bubbles: true }));
+      }, inputId);
+      console.log(`[FAFA] #${inputId}: no suggestion, input cleared`);
+    } else {
+      console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
+    }
+
     await rand(800, 1000);
     return picked;
   };
