@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -21,7 +21,7 @@ export async function transcribeVoice(ctx) {
 
   const transcription = await openai.audio.transcriptions.create({
     model: "whisper-1",
-    file: await openai.toFile(buffer, "voice.ogg", { type: "audio/ogg" }),
+    file: await toFile(buffer, "voice.ogg", { type: "audio/ogg" }),
     language: "ru",
   });
 
