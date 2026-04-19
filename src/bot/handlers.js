@@ -123,10 +123,37 @@ async function handleCallback(ctx) {
         const nowActive = await isMonitoringActive(chatId);
         await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(nowActive) }).catch(() => {});
       } else {
-        const labels = { from: "Откуда (город или страна)", to: "Куда (город или страна)" };
-        filterAwait.set(String(chatId), field);
+        // from / to → show country selection keyboard
+        const labels = { from: "Откуда", to: "Куда" };
         await ctx.answerCbQuery();
-        await ctx.reply(`Напишите значение для «${labels[field] || field}» (или «-» чтобы убрать фильтр):`);
+        await ctx.reply(`${labels[field] || field}: выберите страну:`, { reply_markup: buildCountryKeyboard(field) });
+      }
+      return;
+    }
+
+    if (action === "fsel") {
+      // id = "from:Казахстан" or "to:clear" etc.
+      const colonIdx = id.indexOf(":");
+      const field   = id.substring(0, colonIdx);
+      const country = id.substring(colonIdx + 1);
+      if (country === "clear") {
+        await setFilter(chatId, field, null);
+        await ctx.answerCbQuery("Фильтр убран");
+        const isActive = await isMonitoringActive(chatId);
+        await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) }).catch(() => {});
+      } else if (country === "manual") {
+        filterAwait.set(chatId, field);
+        await ctx.answerCbQuery();
+        const labels = { from: "Откуда", to: "Куда" };
+        await ctx.reply(`Введите «${labels[field]}» вручную (например: «Алматы, Казахстан» или «-» чтобы убрать):`);
+      } else {
+        // Country selected — now ask for city
+        filterStep.set(chatId, { field, country });
+        await ctx.answerCbQuery();
+        const flag = { Казахстан: "🇰🇿", Россия: "🇷🇺", Беларусь: "🇧🇾", Узбекистан: "🇺🇿" }[country] || "🌍";
+        await ctx.reply(
+          `${flag} ${country}\n\nВведите город (или «-» чтобы искать по всей стране без уточнения города):`
+        );
       }
       return;
     }
@@ -194,8 +221,8 @@ async function handleOwnerToday(ctx) {
 }
 
 // ─── Filter state machine ─────────────────────────────────────────────────────
-// Tracks which filter field the owner is currently setting
-const filterAwait = new Map(); // chatId → "from" | "to" | "cargo"
+const filterAwait = new Map(); // chatId → "from" | "to"  (manual text entry)
+const filterStep  = new Map(); // chatId → { field, country }  (country→city flow)
 
 async function buildFilterText(chatId) {
   const f = await getFilters(chatId);
@@ -215,14 +242,34 @@ function buildFilterKeyboard(isActive = false) {
     inline_keyboard: [
       [
         { text: "✏️ Откуда", callback_data: "fset:from" },
-        { text: "✏️ Куда", callback_data: "fset:to" },
+        { text: "✏️ Куда",   callback_data: "fset:to"   },
       ],
       [
         { text: "🔍 Найти сейчас", callback_data: "fset:search" },
-        { text: "🗑 Сбросить всё", callback_data: "fset:clear" },
+        { text: "🗑 Сбросить всё", callback_data: "fset:clear"  },
       ],
       [
         { text: isActive ? "⏹ Остановить мониторинг" : "▶️ Мониторинг каждые 5 мин", callback_data: "fset:monitor" },
+      ],
+    ],
+  };
+}
+
+function buildCountryKeyboard(field) {
+  const p = `fsel:${field}`;
+  return {
+    inline_keyboard: [
+      [
+        { text: "🇰🇿 Казахстан",  callback_data: `${p}:Казахстан`  },
+        { text: "🇷🇺 Россия",     callback_data: `${p}:Россия`     },
+      ],
+      [
+        { text: "🇧🇾 Беларусь",   callback_data: `${p}:Беларусь`   },
+        { text: "🇺🇿 Узбекистан", callback_data: `${p}:Узбекистан` },
+      ],
+      [
+        { text: "🌍 Другая страна (введу сам)", callback_data: `${p}:manual` },
+        { text: "❌ Убрать фильтр",             callback_data: `${p}:clear`  },
       ],
     ],
   };
@@ -294,19 +341,36 @@ export async function handleStart(ctx) {
 
 export async function handleText(ctx) {
   const chatId = String(ctx.chat.id);
-  const userMessage = ctx.message.text;
-  if (!userMessage?.trim()) return;
+  const userMessage = ctx.message.text?.trim();
+  if (!userMessage) return;
 
-  // FA-FA filter input
+  const labels = { from: "Откуда", to: "Куда" };
+
+  // Step 2 of country→city flow
+  const step = filterStep.get(chatId);
+  if (step) {
+    filterStep.delete(chatId);
+    const { field, country } = step;
+    // "-" means search whole country, no city
+    const value = userMessage === "-" ? country : `${userMessage}, ${country}`;
+    await setFilter(chatId, field, value);
+    const isActive = await isMonitoringActive(chatId);
+    await ctx.reply(
+      `✅ ${labels[field]}: ${value}\n\n${await buildFilterText(chatId)}`,
+      { reply_markup: buildFilterKeyboard(isActive) }
+    );
+    return;
+  }
+
+  // Manual text entry (after "Другая страна")
   const awaitField = filterAwait.get(chatId);
   if (awaitField) {
     filterAwait.delete(chatId);
-    const value = userMessage.trim() === "-" ? null : userMessage.trim();
+    const value = userMessage === "-" ? null : userMessage;
     await setFilter(chatId, awaitField, value);
-    const labels = { from: "Откуда", to: "Куда" };
     const isActive = await isMonitoringActive(chatId);
     await ctx.reply(
-      `${value ? `✅ Фильтр «${labels[awaitField]}» установлен: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${await buildFilterText(chatId)}`,
+      `${value ? `✅ ${labels[awaitField]}: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${await buildFilterText(chatId)}`,
       { reply_markup: buildFilterKeyboard(isActive) }
     );
     return;
