@@ -2,8 +2,13 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-export async function saveLead(leadData) {
-  const row = {
+export function normalizePhone(phone) {
+  if (!phone) return null;
+  return phone.replace(/[\s\(\)\-\+]/g, "");
+}
+
+function buildRow(leadData) {
+  return {
     from_city: leadData.from || null,
     to_city: leadData.to || null,
     cargo: leadData.cargo || null,
@@ -16,23 +21,80 @@ export async function saveLead(leadData) {
     need_loading: leadData.need_loading || null,
     need_unloading: leadData.need_unloading || null,
     sender_name: leadData.sender_name || null,
-    sender_phone: leadData.sender_phone || null,
+    sender_phone: normalizePhone(leadData.sender_phone),
     receiver_name: leadData.receiver_name || null,
-    receiver_phone: leadData.receiver_phone || null,
+    receiver_phone: normalizePhone(leadData.receiver_phone),
     transport_type: leadData.transport_type || null,
     urgency: leadData.urgency || null,
     notes: leadData.notes || null,
+    status: "new",
   };
+}
+
+export async function saveLead(leadData) {
+  const phone = normalizePhone(leadData.sender_phone);
+  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+
+  if (phone) {
+    const { data: existing } = await supabase
+      .from("leads")
+      .select("id")
+      .eq("sender_phone", phone)
+      .gte("created_at", fiveMinutesAgo)
+      .maybeSingle();
+
+    if (existing) {
+      const { data, error } = await supabase
+        .from("leads")
+        .update(buildRow(leadData))
+        .eq("id", existing.id)
+        .select()
+        .single();
+      if (error) throw new Error(`Supabase update failed: ${error.message}`);
+      return data;
+    }
+  }
 
   const { data, error } = await supabase
     .from("leads")
-    .insert(row)
+    .insert(buildRow(leadData))
     .select()
     .single();
 
-  if (error) {
-    throw new Error(`Supabase insert failed: ${error.message}`);
-  }
-
+  if (error) throw new Error(`Supabase insert failed: ${error.message}`);
   return data;
+}
+
+export async function updateLeadStatus(id, status) {
+  const { error } = await supabase.from("leads").update({ status }).eq("id", id);
+  if (error) throw new Error(`Status update failed: ${error.message}`);
+}
+
+export async function getLeadById(id) {
+  const { data, error } = await supabase.from("leads").select("*").eq("id", id).single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+export async function getLeadsByStatus(status) {
+  const { data, error } = await supabase
+    .from("leads")
+    .select("*")
+    .eq("status", status)
+    .order("created_at", { ascending: false })
+    .limit(10);
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function getLeadsToday() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const { data, error } = await supabase
+    .from("leads")
+    .select("*")
+    .gte("created_at", today.toISOString())
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(error.message);
+  return data || [];
 }
