@@ -141,7 +141,7 @@ async function handleCallback(ctx) {
       await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
       await ctx.telegram.sendMessage(chatId, `✅ Заявка ${id.substring(0, 8)} принята в работу.`);
       if (lead.client_chat_id) {
-        await ctx.telegram.sendMessage(lead.client_chat_id, "✅ Ваша заявка принята в работу! Менеджер скоро свяжется с вами.").catch(() => {});
+        await ctx.telegram.sendMessage(lead.client_chat_id, "Заявка принята в работу ✅\n\nВаш запрос уже обрабатывается.\nС вами скоро свяжутся для уточнения деталей 📞").catch(() => {});
       }
     } else if (action === "reject") {
       const lead = await getLeadById(id);
