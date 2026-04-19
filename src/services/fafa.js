@@ -161,9 +161,9 @@ async function scrape() {
 }
 
 async function doLogin(page) {
-  const login = process.env.DELLA_LOGIN;
-  const password = process.env.DELLA_PASSWORD;
-  if (!login || !password) throw new Error("DELLA_LOGIN / DELLA_PASSWORD env vars missing");
+  const login = process.env.FAFA_LOGIN;
+  const password = process.env.FAFA_PASSWORD;
+  if (!login || !password) throw new Error("FAFA_LOGIN / FAFA_PASSWORD env vars missing");
 
   console.log("[FAFA] logging in...");
 
