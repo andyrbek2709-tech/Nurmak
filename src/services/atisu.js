@@ -195,28 +195,62 @@ async function fillSearchForm(page, filters) {
   if (filters.from) await fillReactInput("from", fromSelectors, filters.from);
   if (filters.to)   await fillReactInput("to",   toSelectors,   filters.to);
 
-  // Submit — ATI.SU button text is "Найти груз"
+  // ATI.SU may auto-search after city selection — wait briefly first
+  await rand(2000, 2500);
+
+  // Submit: find button in the same container as the search inputs using innerText
+  // (textContent picks up hidden nav items; innerText respects CSS display)
   const submitted = await page.evaluate(() => {
-    const buttons = Array.from(document.querySelectorAll("button, [role='button']"));
-    const btn = buttons.find(b =>
-      /найти\s*груз/i.test(b.textContent) ||
-      /поиск/i.test(b.textContent) ||
-      b.type === "submit"
-    );
-    if (btn) { btn.click(); return btn.textContent?.trim() || "clicked"; }
+    const fromInput = document.querySelector("input[placeholder*='Например, Москва']");
+
+    // Walk up from the search input to find a button within the same form section
+    if (fromInput) {
+      let el = fromInput.parentElement;
+      for (let depth = 0; depth < 10; depth++) {
+        if (!el) break;
+        const btns = Array.from(el.querySelectorAll("button")).filter(b => {
+          const t = (b.innerText || "").trim();
+          return t.length > 0 && t.length < 30;
+        });
+        if (btns.length > 0) {
+          const btn = btns[btns.length - 1]; // last button in form section = submit
+          btn.click();
+          return `form-container: "${(btn.innerText || "").trim()}"`;
+        }
+        el = el.parentElement;
+      }
+    }
+
+    // Fallback: find button by exact innerText (not textContent which includes hidden nav)
+    const btn = Array.from(document.querySelectorAll("button")).find(b => {
+      const t = (b.innerText || "").trim();
+      return /^обновить/i.test(t) || /^найти\s*(груз)?$/i.test(t);
+    });
+    if (btn) { btn.click(); return `text: "${(btn.innerText || "").trim()}"`; }
     return null;
   });
+
   if (submitted) {
-    console.log(`[ATISU] search submitted via button: "${submitted}"`);
+    console.log(`[ATISU] search submitted via ${submitted}`);
   } else {
-    await page.keyboard.press("Enter");
-    console.log(`[ATISU] search submitted via Enter`);
+    // Last resort: press Enter on the to-input via keyboard event
+    await page.evaluate(() => {
+      const toInput = document.querySelector("input[placeholder*='Например, Санкт-Петербург']");
+      if (toInput) {
+        toInput.focus();
+        toInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+        toInput.dispatchEvent(new KeyboardEvent("keyup",   { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+      }
+    });
+    console.log(`[ATISU] search submitted via keyboard Enter on to-input`);
   }
 
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  await rand(3000, 4000);
+  await rand(4000, 5000);
   console.log(`[ATISU] search done, URL: ${page.url()}`);
-  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 600));
+
+  // Dump more body to diagnose result structure
+  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 2000));
   console.log(`[ATISU] body snippet:`, bodySnip);
 }
 
