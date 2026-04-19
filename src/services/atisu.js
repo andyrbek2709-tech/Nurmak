@@ -116,21 +116,10 @@ async function fillSearchForm(page, filters) {
   if (!filters.from && !filters.to) return;
   console.log(`[ATISU] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
 
-  // Dump all visible inputs for diagnostic
-  const allInputs = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("input")).slice(0, 20).map(el => ({
-      placeholder: el.placeholder, name: el.name, id: el.id, type: el.type,
-      cls: el.className.slice(0, 60),
-    }))
-  );
-  console.log(`[ATISU] inputs on page:`, JSON.stringify(allInputs));
-
-  // Fill a React-controlled input: use native setter so React picks up the change,
-  // then type chars one-by-one to trigger autocomplete suggestions.
   const fillReactInput = async (label, selectorList, value) => {
     if (!value) return;
 
-    // Try each selector until one matches a visible element
+    // Find first matching visible input
     let handle = null;
     let matchedSel = null;
     for (const sel of selectorList) {
@@ -140,13 +129,10 @@ async function fillSearchForm(page, filters) {
         break;
       } catch (_) {}
     }
-    if (!handle) {
-      console.log(`[ATISU] ${label}: no input found with selectors:`, selectorList);
-      return;
-    }
-    console.log(`[ATISU] ${label}: matched selector "${matchedSel}"`);
+    if (!handle) { console.log(`[ATISU] ${label}: no input found`); return; }
+    console.log(`[ATISU] ${label}: matched "${matchedSel}"`);
 
-    // Clear + set value via React native-setter trick
+    // Clear via React native setter, then type char-by-char
     await page.evaluate((el) => {
       el.focus();
       const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -154,91 +140,84 @@ async function fillSearchForm(page, filters) {
       el.dispatchEvent(new Event("input", { bubbles: true }));
     }, handle);
     await rand(200, 300);
-
-    // Type char by char — most reliable way to trigger React autocomplete
     await page.evaluate((el) => el.focus(), handle);
     await page.keyboard.type(value, { delay: 80 });
-    await rand(1000, 1500);
+    await rand(1200, 1600);
 
-    // Wait for any dropdown
-    const dropSelectors = [
-      "[role='option']",
-      "[role='listbox'] li",
-      "[role='listbox'] [role='option']",
-      "ul[class*='suggest'] li",
-      "ul[class*='dropdown'] li",
-      "[class*='Suggest'] li",
-      "[class*='suggest'] li",
-      "[class*='autocomplete'] li",
-      "[class*='Autocomplete'] li",
-      "li[class*='item']",
-    ];
-    let picked = false;
-    for (const dSel of dropSelectors) {
-      try {
-        await page.waitForSelector(dSel, { timeout: 3000 });
-        const items = await page.evaluate((sel) =>
-          Array.from(document.querySelectorAll(sel)).slice(0, 5).map(el => ({
-            text: el.textContent?.trim(), visible: !!el.offsetParent,
-          }))
-        , dSel);
-        console.log(`[ATISU] ${label}: dropdown "${dSel}":`, JSON.stringify(items));
-        const visibleItem = await page.locator(dSel).filter({ hasText: /./ }).first();
-        if (await visibleItem.isVisible()) {
-          await visibleItem.click({ timeout: 3000 });
-          console.log(`[ATISU] ${label}: clicked first dropdown item`);
-          picked = true;
-          break;
-        }
-      } catch (_) {}
+    // Wait for dropdown
+    try {
+      await page.waitForSelector("[role='option']", { timeout: 5000 });
+    } catch (_) {
+      console.log(`[ATISU] ${label}: no dropdown appeared`);
+      return;
     }
-    if (!picked) console.log(`[ATISU] ${label}: no dropdown — using typed value`);
-    await rand(400, 600);
+
+    // Get all visible options
+    const options = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("[role='option']"))
+        .filter(el => el.offsetParent !== null)
+        .map(el => el.textContent?.trim() || "")
+        .filter(Boolean)
+    );
+    console.log(`[ATISU] ${label}: options:`, JSON.stringify(options));
+
+    // Smart best-match: exact → starts-with-comma → first
+    const vl = value.toLowerCase();
+    const best = options.find(t => t.toLowerCase() === vl)
+      || options.find(t => t.toLowerCase().startsWith(vl + ","))
+      || options.find(t => t.toLowerCase().startsWith(vl + " "))
+      || options[0];
+
+    if (!best) { console.log(`[ATISU] ${label}: no option to click`); return; }
+
+    // Click via evaluate — most reliable for React SPAs
+    const clicked = await page.evaluate((text) => {
+      const items = Array.from(document.querySelectorAll("[role='option']"));
+      const item = items.find(el => el.offsetParent !== null && el.textContent?.trim() === text);
+      if (item) { item.click(); return true; }
+      return false;
+    }, best);
+    console.log(`[ATISU] ${label}: ${clicked ? `clicked "${best}"` : "click failed"}`);
+    await rand(600, 900);
   };
 
   const fromSelectors = [
+    "input[placeholder*='Например, Москва']",
+    "[class*='From'] input", "[class*='from'] input",
     "input[placeholder*='Откуда']", "input[placeholder*='откуда']",
-    "input[placeholder*='город отправ']", "input[placeholder*='Город отправ']",
-    "input[name*='from']", "input[name*='cityFrom']", "input[name*='departure']",
-    ".from-input input", "[class*='from'] input", "[class*='From'] input",
   ];
   const toSelectors = [
+    "input[placeholder*='Например, Санкт-Петербург']",
+    "[class*='To'] input", "[class*='to'] input",
     "input[placeholder*='Куда']", "input[placeholder*='куда']",
-    "input[placeholder*='город назнач']", "input[placeholder*='Город назнач']",
-    "input[name*='to']", "input[name*='cityTo']", "input[name*='destination']",
-    ".to-input input", "[class*='to'] input", "[class*='To'] input",
   ];
 
   if (filters.from) await fillReactInput("from", fromSelectors, filters.from);
   if (filters.to)   await fillReactInput("to",   toSelectors,   filters.to);
 
-  // Submit — try button selectors, then Enter
-  const submitSelectors = [
-    "button[type='submit']", "[data-test='search-btn']", "button.search-btn",
-    "button[class*='search']", "button[class*='Search']",
-    "[class*='submit']", "[class*='Submit']",
-  ];
-  let submitted = false;
-  for (const sel of submitSelectors) {
-    try {
-      await page.click(sel, { timeout: 3000 });
-      console.log(`[ATISU] search submitted via "${sel}"`);
-      submitted = true;
-      break;
-    } catch (_) {}
-  }
-  if (!submitted) {
+  // Submit — ATI.SU button text is "Найти груз"
+  const submitted = await page.evaluate(() => {
+    const buttons = Array.from(document.querySelectorAll("button, [role='button']"));
+    const btn = buttons.find(b =>
+      /найти\s*груз/i.test(b.textContent) ||
+      /поиск/i.test(b.textContent) ||
+      b.type === "submit"
+    );
+    if (btn) { btn.click(); return btn.textContent?.trim() || "clicked"; }
+    return null;
+  });
+  if (submitted) {
+    console.log(`[ATISU] search submitted via button: "${submitted}"`);
+  } else {
     await page.keyboard.press("Enter");
     console.log(`[ATISU] search submitted via Enter`);
   }
 
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  await rand(2000, 3000);
+  await rand(3000, 4000);
   console.log(`[ATISU] search done, URL: ${page.url()}`);
-
-  // Dump page body snippet for debugging
-  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 500));
-  console.log(`[ATISU] page body snippet:`, bodySnip);
+  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 600));
+  console.log(`[ATISU] body snippet:`, bodySnip);
 }
 
 async function extractItems(page) {
