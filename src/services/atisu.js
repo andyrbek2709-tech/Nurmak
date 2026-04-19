@@ -198,35 +198,36 @@ async function fillSearchForm(page, filters) {
   // ATI.SU may auto-search after city selection — wait briefly first
   await rand(2000, 2500);
 
-  // Submit: find button in the same container as the search inputs using innerText
-  // (textContent picks up hidden nav items; innerText respects CSS display)
+  // Submit: find the "НАЙТИ ГРУЗЫ" button by innerText
   const submitted = await page.evaluate(() => {
-    const fromInput = document.querySelector("input[placeholder*='Например, Москва']");
+    const SKIP = /выбрать\s*список|очистить|добавить|войти|регистр|фильтр/i;
 
-    // Walk up from the search input to find a button within the same form section
+    // Priority: find by known button texts ("НАЙТИ ГРУЗЫ", "ОБНОВИТЬ" etc.)
+    const allBtns = Array.from(document.querySelectorAll("button"));
+    const byText = allBtns.find(b => {
+      const t = (b.innerText || "").trim();
+      return /^найти\s*груз/i.test(t) || /^обновить/i.test(t) || /^найти$/i.test(t);
+    });
+    if (byText) { byText.click(); return `text: "${(byText.innerText || "").trim()}"`; }
+
+    // Fallback: walk up from search input, skipping known non-submit buttons
+    const fromInput = document.querySelector("input[placeholder*='Например, Москва']");
     if (fromInput) {
       let el = fromInput.parentElement;
       for (let depth = 0; depth < 10; depth++) {
         if (!el) break;
         const btns = Array.from(el.querySelectorAll("button")).filter(b => {
           const t = (b.innerText || "").trim();
-          return t.length > 0 && t.length < 30;
+          return t.length > 0 && t.length < 40 && !SKIP.test(t);
         });
         if (btns.length > 0) {
-          const btn = btns[btns.length - 1]; // last button in form section = submit
+          const btn = btns[btns.length - 1];
           btn.click();
           return `form-container: "${(btn.innerText || "").trim()}"`;
         }
         el = el.parentElement;
       }
     }
-
-    // Fallback: find button by exact innerText (not textContent which includes hidden nav)
-    const btn = Array.from(document.querySelectorAll("button")).find(b => {
-      const t = (b.innerText || "").trim();
-      return /^обновить/i.test(t) || /^найти\s*(груз)?$/i.test(t);
-    });
-    if (btn) { btn.click(); return `text: "${(btn.innerText || "").trim()}"`; }
     return null;
   });
 

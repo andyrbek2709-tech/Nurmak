@@ -107,11 +107,23 @@ const COUNTRY_ALIASES = {
 function matchesFilters(item, filters) {
   const matches = (field, filterVal) => {
     if (!filterVal) return true;
-    const val = field?.toLowerCase() || "";
+    const val = (field || "").toLowerCase();
     const flt = filterVal.toLowerCase();
+
+    // Full match
     if (val.includes(flt)) return true;
-    const code = COUNTRY_ALIASES[flt];
+
+    // Handle "City, Country" format — try city part and country part separately
+    const commaIdx = flt.indexOf(",");
+    const cityPart    = commaIdx >= 0 ? flt.substring(0, commaIdx).trim() : flt;
+    const countryPart = commaIdx >= 0 ? flt.substring(commaIdx + 1).trim() : flt;
+
+    if (cityPart && val.includes(cityPart)) return true;
+
+    const code = COUNTRY_ALIASES[countryPart];
     if (code && val.includes(code.toLowerCase())) return true;
+    if (countryPart !== cityPart && val.includes(countryPart)) return true;
+
     return false;
   };
   if (!matches(item.from, filters.from)) return false;
@@ -352,10 +364,11 @@ async function fillSearchForm(page, filters) {
     return picked;
   };
 
-  // City[1] = #search1 (from), city_end = #search10 (to)
-  // Always attempt autocomplete — the site supports both city names and country names (e.g. "Россия").
-  if (filters.from) await typeAndPickSuggestion("search1", filters.from);
-  if (filters.to)   await typeAndPickSuggestion("search10", filters.to);
+  // FA-FA autocomplete expects just the city/country name without ", Country" suffix
+  const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
+  const cityTo   = filters.to   ? filters.to.split(",")[0].trim()   : null;
+  if (cityFrom) await typeAndPickSuggestion("search1",  cityFrom);
+  if (cityTo)   await typeAndPickSuggestion("search10", cityTo);
 
   // Truck type select
   if (filters.truck_type) {
