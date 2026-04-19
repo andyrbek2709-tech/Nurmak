@@ -6,63 +6,84 @@ const SEARCH_URL = `${FAFA_URL}/search_load/`;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
 
 let _bot = null;
-let _chatId = null;
-let monitorTimer = null;
-let seenKeys = new Set();
-let isRunning = false;
 
-// Filters set by manager via Telegram
-const filters = { from: null, to: null, cargo: null, truck_type: null };
+// Per-user state: chatId → { filters, seenKeys, isRunning, monitorTimer }
+const users = new Map();
 
-export function initFafa(bot, chatId) {
-  _bot = bot; _chatId = chatId;
-  // Load persisted filters on startup
-  loadBotSetting("filters").then(val => {
-    if (val) {
-      try {
-        const saved = JSON.parse(val);
-        Object.assign(filters, saved);
-        console.log("[FAFA] filters loaded from DB:", JSON.stringify(filters));
-      } catch (_) {}
-    }
-  }).catch(() => {});
+function emptyFilters() {
+  return { from: null, to: null, cargo: null, truck_type: null };
 }
-export function isMonitoringActive() { return isRunning; }
-export function getFilters() { return { ...filters }; }
-export function setFilter(key, value) {
-  if (key in filters) {
-    filters[key] = value?.trim() || null;
-    saveBotSetting("filters", JSON.stringify(filters)).catch(() => {});
+
+async function getOrInitUser(chatId) {
+  const key = String(chatId);
+  if (!users.has(key)) {
+    const state = { filters: emptyFilters(), seenKeys: new Set(), isRunning: false, monitorTimer: null };
+    users.set(key, state);
+    try {
+      const val = await loadBotSetting(`filters_${key}`);
+      if (val) {
+        const saved = JSON.parse(val);
+        Object.assign(state.filters, saved);
+        console.log(`[FAFA] filters loaded for ${key}:`, JSON.stringify(state.filters));
+      }
+    } catch (_) {}
+  }
+  return users.get(key);
+}
+
+export function initFafa(bot) {
+  _bot = bot;
+}
+
+export async function isMonitoringActive(chatId) {
+  const u = await getOrInitUser(chatId);
+  return u.isRunning;
+}
+
+export async function getFilters(chatId) {
+  const u = await getOrInitUser(chatId);
+  return { ...u.filters };
+}
+
+export async function setFilter(chatId, key, value) {
+  const u = await getOrInitUser(chatId);
+  if (key in u.filters) {
+    u.filters[key] = value?.trim() || null;
+    saveBotSetting(`filters_${chatId}`, JSON.stringify(u.filters)).catch(() => {});
   }
 }
-export function clearFilters() {
-  filters.from = null; filters.to = null;
-  filters.cargo = null; filters.truck_type = null;
-  saveBotSetting("filters", JSON.stringify(filters)).catch(() => {});
+
+export async function clearFilters(chatId) {
+  const u = await getOrInitUser(chatId);
+  u.filters = emptyFilters();
+  saveBotSetting(`filters_${chatId}`, JSON.stringify(u.filters)).catch(() => {});
 }
 
-export async function startMonitoring() {
-  if (isRunning) return;
-  isRunning = true;
-  seenKeys.clear();
-  console.log("[FAFA] monitoring started");
-  await tick();
+export async function startMonitoring(chatId) {
+  const u = await getOrInitUser(chatId);
+  if (u.isRunning) return;
+  u.isRunning = true;
+  u.seenKeys.clear();
+  console.log(`[FAFA] monitoring started for ${chatId}`);
+  await tick(chatId);
 }
 
-export function stopMonitoring() {
-  isRunning = false;
-  if (monitorTimer) { clearTimeout(monitorTimer); monitorTimer = null; }
-  seenKeys.clear();
-  console.log("[FAFA] monitoring stopped");
+export async function stopMonitoring(chatId) {
+  const u = users.get(String(chatId));
+  if (!u) return;
+  u.isRunning = false;
+  if (u.monitorTimer) { clearTimeout(u.monitorTimer); u.monitorTimer = null; }
+  u.seenKeys.clear();
+  console.log(`[FAFA] monitoring stopped for ${chatId}`);
 }
 
-// One-time search — runs once and sends ALL matched items regardless of seenKeys
-export async function runOnce() {
-  console.log("[FAFA] running one-time search...");
+export async function runOnce(chatId) {
+  const u = await getOrInitUser(chatId);
+  console.log(`[FAFA] running one-time search for ${chatId}...`);
   try {
-    const items = await scrape();
+    const items = await scrape(u.filters);
     console.log(`[FAFA] one-time: fetched ${items.length} items`);
-    const matched = items.filter(matchesFilters);
+    const matched = items.filter(item => matchesFilters(item, u.filters));
     console.log(`[FAFA] one-time: matched ${matched.length} items`);
     return matched;
   } catch (err) {
@@ -80,7 +101,7 @@ const COUNTRY_ALIASES = {
   "грузия": "GE", "армения": "AM", "китай": "CN",
 };
 
-function matchesFilters(item) {
+function matchesFilters(item, filters) {
   const matches = (field, filterVal) => {
     if (!filterVal) return true;
     const val = field?.toLowerCase() || "";
@@ -104,38 +125,39 @@ function makeKey(item) {
     .toLowerCase().replace(/\s+/g, "");
 }
 
-async function tick() {
-  if (!isRunning) return;
+async function tick(chatId) {
+  const u = users.get(String(chatId));
+  if (!u || !u.isRunning) return;
   try {
-    const items = await scrape();
-    console.log(`[FAFA] fetched ${items.length} items`);
+    const items = await scrape(u.filters);
+    console.log(`[FAFA] fetched ${items.length} items for ${chatId}`);
 
     const fresh = items.filter(i => {
       const k = makeKey(i);
-      return k.length > 3 && !seenKeys.has(k);
+      return k.length > 3 && !u.seenKeys.has(k);
     });
-    const matched = fresh.filter(matchesFilters);
+    const matched = fresh.filter(item => matchesFilters(item, u.filters));
 
-    for (const item of fresh) seenKeys.add(makeKey(item));
+    for (const item of fresh) u.seenKeys.add(makeKey(item));
 
     if (matched.length > 0) {
-      for (const item of matched) await notify(item, true);
-      console.log(`[FAFA] sent ${matched.length} notifications`);
+      for (const item of matched) await notify(item, chatId, true);
+      console.log(`[FAFA] sent ${matched.length} notifications to ${chatId}`);
     } else {
-      await _bot.telegram.sendMessage(_chatId, "🔍 Пока нет ничего нового").catch(e =>
+      await _bot.telegram.sendMessage(chatId, "🔍 Пока нет ничего нового").catch(e =>
         console.error("[FAFA] sendMessage error:", e.message)
       );
     }
   } catch (err) {
     console.error("[FAFA] tick error:", err.message);
   }
-  if (isRunning) monitorTimer = setTimeout(tick, CHECK_INTERVAL_MS);
+  if (u.isRunning) u.monitorTimer = setTimeout(() => tick(chatId), CHECK_INTERVAL_MS);
 }
 
-async function notify(item, isNew = false) {
-  if (!_bot || !_chatId) return;
+async function notify(item, chatId, isNew = false) {
+  if (!_bot) return;
   const text = buildMessage(item, { isNew });
-  await _bot.telegram.sendMessage(_chatId, text).catch(e =>
+  await _bot.telegram.sendMessage(chatId, text).catch(e =>
     console.error("[FAFA] sendMessage error:", e.message)
   );
 }
@@ -160,7 +182,7 @@ export function buildMessage(item, opts = {}) {
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 function rand(min, max) { return delay(Math.floor(min + Math.random() * (max - min))); }
 
-async function scrape() {
+async function scrape(filters) {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
@@ -185,7 +207,7 @@ async function scrape() {
     await rand(1500, 2000);
 
     // Fill search form with filters (site-side filtering)
-    await fillSearchForm(page);
+    await fillSearchForm(page, filters);
 
     await rand(2000, 3000);
     console.log(`[FAFA] scraping URL: ${page.url()}, title: ${await page.title()}`);
@@ -200,7 +222,7 @@ async function scrape() {
   }
 }
 
-async function fillSearchForm(page) {
+async function fillSearchForm(page, filters) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
 

@@ -1,11 +1,7 @@
-import { getContext, setContext, clearContext } from "../utils/state.js";
-import { chat } from "../services/openai.js";
-import { transcribeVoice } from "../services/whisper.js";
 import {
-  saveLead, updateLeadStatus, getLeadById,
-  getLeadsByStatus, getLeadsToday, normalizePhone,
+  updateLeadStatus, getLeadById,
+  getLeadsByStatus, getLeadsToday,
 } from "../services/supabase.js";
-import { getUser, upsertUser } from "../services/users.js";
 import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters, runOnce, buildMessage } from "../services/fafa.js";
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
@@ -17,7 +13,7 @@ const reminders = new Map();
 export function registerHandlers(bot) {
   _bot = bot;
 
-  initFafa(bot, MANAGER_CHAT_ID);
+  initFafa(bot);
 
   bot.start(handleStart);
 
@@ -35,57 +31,6 @@ export function registerHandlers(bot) {
   bot.on("callback_query", handleCallback);
 }
 
-// ─── Notification ────────────────────────────────────────────────────────────
-
-function formatNotification(lead) {
-  const short = lead.id.substring(0, 8);
-  return [
-    `🚛 Новая заявка`,
-    ``,
-    `🆔 ID: ${short}`,
-    ``,
-    `📍 Маршрут: ${lead.from_city || "—"} → ${lead.to_city || "—"}`,
-    `📌 Адрес загрузки: ${lead.from_address || "—"}`,
-    `📌 Адрес разгрузки: ${lead.to_address || "—"}`,
-    `📦 Груз: ${lead.cargo || "—"}`,
-    `Вес: ${lead.weight || "—"}`,
-    `Объём: ${lead.volume || "—"}`,
-    ``,
-    `📅 Загрузка: ${lead.date_loading || "—"} (${lead.time_loading || "—"})`,
-    `📅 Разгрузка: ${lead.time_unloading || "—"}`,
-    ``,
-    `⚙️ Погрузка: ${lead.need_loading || "—"}`,
-    `⚙️ Разгрузка: ${lead.need_unloading || "—"}`,
-    ``,
-    `👤 Отправитель: ${lead.sender_name || "—"} ${lead.sender_phone || ""}`,
-    `👤 Получатель: ${lead.receiver_name || "—"} ${lead.receiver_phone || ""}`,
-    ``,
-    `📝 Комментарий: ${lead.notes || "—"}`,
-  ].join("\n");
-}
-
-function buildKeyboard(lead) {
-  const phone = normalizePhone(lead.sender_phone) || normalizePhone(lead.receiver_phone);
-  const id = lead.id;
-
-  const rows = [
-    [
-      { text: "✅ Принять", callback_data: `accept:${id}` },
-      { text: "❌ Отклонить", callback_data: `reject:${id}` },
-    ],
-    [
-      { text: "⏱ 5 мин", callback_data: `delay5:${id}` },
-      { text: "⏱ 15 мин", callback_data: `delay15:${id}` },
-      { text: "⏱ 30 мин", callback_data: `delay30:${id}` },
-    ],
-  ];
-
-  if (phone) {
-    rows.push([{ text: "💬 WhatsApp", url: `https://wa.me/${phone}` }]);
-  }
-
-  return { inline_keyboard: rows };
-}
 
 // ─── Reminders ───────────────────────────────────────────────────────────────
 
@@ -143,23 +88,23 @@ async function handleCallback(ctx) {
     if (action === "fset") {
       const field = id;
       if (field === "clear") {
-        clearFilters();
+        await clearFilters(chatId);
         await ctx.answerCbQuery("Фильтры сброшены");
-        await ctx.editMessageText(buildFilterText(), { reply_markup: buildFilterKeyboard() });
+        await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard() });
       } else if (field === "search") {
         await ctx.answerCbQuery("Ищу...");
         await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
-        runOnce().then(async (items) => {
+        runOnce(chatId).then(async (items) => {
           if (!items.length) {
-            await ctx.telegram.sendMessage(MANAGER_CHAT_ID, "По вашим фильтрам ничего не найдено.");
+            await ctx.telegram.sendMessage(chatId, "По вашим фильтрам ничего не найдено.");
             return;
           }
           for (const item of items) {
-            await ctx.telegram.sendMessage(MANAGER_CHAT_ID, buildMessage(item)).catch(() => {});
+            await ctx.telegram.sendMessage(chatId, buildMessage(item)).catch(() => {});
           }
-          await ctx.telegram.sendMessage(MANAGER_CHAT_ID, `✅ Найдено ${items.length} заявок.`);
+          await ctx.telegram.sendMessage(chatId, `✅ Найдено ${items.length} заявок.`);
         }).catch(async (err) => {
-          await ctx.telegram.sendMessage(MANAGER_CHAT_ID, `❌ Ошибка поиска: ${err.message}`).catch(() => {});
+          await ctx.telegram.sendMessage(chatId, `❌ Ошибка поиска: ${err.message}`).catch(() => {});
         });
       } else {
         const labels = { from: "Откуда (город)", to: "Куда (город)", cargo: "Тип груза", truck_type: "Тип машины (Тент, Рефрижератор, Бортовой...)" };
@@ -236,8 +181,8 @@ async function handleOwnerToday(ctx) {
 // Tracks which filter field the owner is currently setting
 const filterAwait = new Map(); // chatId → "from" | "to" | "cargo"
 
-function buildFilterText() {
-  const f = getFilters();
+async function buildFilterText(chatId) {
+  const f = await getFilters(chatId);
   return [
     `⚙️ Фильтры поиска FA-FA:`,
     ``,
@@ -269,28 +214,20 @@ function buildFilterKeyboard() {
 
 async function handleFilter(ctx) {
   const chatId = String(ctx.chat.id);
-  if (chatId !== String(MANAGER_CHAT_ID)) { await ctx.reply("Нет доступа."); return; }
-  await ctx.reply(buildFilterText(), { reply_markup: buildFilterKeyboard() });
+  await ctx.reply(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard() });
 }
 
 async function handleMonitor(ctx) {
   const chatId = String(ctx.chat.id);
-  const allowed = String(MANAGER_CHAT_ID);
-
-  if (chatId !== allowed) {
-    await ctx.reply("Нет доступа.");
-    return;
-  }
-
   try {
-    if (isMonitoringActive()) {
-      stopMonitoring();
+    if (await isMonitoringActive(chatId)) {
+      await stopMonitoring(chatId);
       await ctx.reply("⏹ Мониторинг fa-fa.kz остановлен.");
     } else {
       await ctx.reply("▶️ Мониторинг fa-fa.kz запущен. Проверка каждые 3 минуты.");
-      startMonitoring().catch(err => {
+      startMonitoring(chatId).catch(err => {
         console.error("[FAFA] startMonitoring error:", err.message);
-        ctx.telegram.sendMessage(MANAGER_CHAT_ID, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
+        ctx.telegram.sendMessage(chatId, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
       });
     }
   } catch (err) {
@@ -300,10 +237,10 @@ async function handleMonitor(ctx) {
 }
 
 async function handleSearchOnce(ctx) {
-  if (String(ctx.chat.id) !== String(MANAGER_CHAT_ID)) { await ctx.reply("Нет доступа."); return; }
+  const chatId = String(ctx.chat.id);
   await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
   try {
-    const items = await runOnce();
+    const items = await runOnce(chatId);
     if (!items.length) { await ctx.reply("По вашим фильтрам ничего не найдено."); return; }
     for (const item of items) {
       await ctx.reply(buildMessage(item));
@@ -315,157 +252,58 @@ async function handleSearchOnce(ctx) {
 }
 
 async function handleHelp(ctx) {
-  const isOwner = String(ctx.chat.id) === String(MANAGER_CHAT_ID);
-
-  if (isOwner) {
-    await ctx.reply([
-      `📖 Команды менеджера`,
-      ``,
-      `━━━ Заявки от клиентов ━━━`,
-      `/new — показать новые заявки`,
-      `/active — заявки в работе`,
-      `/today — все заявки за сегодня`,
-      ``,
-      `━━━ Мониторинг FA-FA.KZ ━━━`,
-      `/monitor — запустить / остановить мониторинг`,
-      `   Бот проверяет сайт каждые 3 минуты`,
-      `   и присылает новые грузы сюда`,
-      ``,
-      `/filter — настроить фильтры и запустить поиск`,
-      `   🗺 Откуда / Куда — город`,
-      `   📦 Груз — тип груза`,
-      `   🚛 Тип машины — Тент, Рефрижератор, Бортовой...`,
-      `   🔍 Найти сейчас — разовый поиск`,
-      `   Напишите - (минус) чтобы убрать фильтр`,
-      `/search — разовый поиск по текущим фильтрам`,
-      ``,
-      `━━━ Кнопки у заявки ━━━`,
-      `✅ Принять — взять заявку в работу`,
-      `❌ Отклонить — отклонить заявку`,
-      `⏱ 5 / 15 / 30 мин — напомнить позже`,
-      `💬 WhatsApp — написать клиенту напрямую`,
-    ].join("\n"));
-  } else {
-    await ctx.reply([
-      `Здравствуйте! Я логистический менеджер по грузоперевозкам.`,
-      ``,
-      `Просто расскажите о вашем грузе — откуда, куда и что везём.`,
-      `Я соберу заявку и передам её менеджеру.`,
-      ``,
-      `Вы также можете отправить голосовое сообщение 🎙`,
-    ].join("\n"));
-  }
+  await ctx.reply([
+    `📖 Команды бота FA-FA.KZ`,
+    ``,
+    `/filter — настроить фильтры поиска`,
+    `   🗺 Откуда / Куда — город или страна`,
+    `   📦 Груз — тип груза`,
+    `   🚛 Тип машины — Тент, Рефрижератор, Бортовой...`,
+    `   🔍 Найти сейчас — разовый поиск`,
+    `   Напишите - (минус) чтобы убрать фильтр`,
+    ``,
+    `/search — разовый поиск по текущим фильтрам`,
+    `/monitor — запустить / остановить мониторинг`,
+    `   Бот проверяет сайт каждые 3 минуты`,
+    `   и присылает вам новые грузы`,
+  ].join("\n"));
 }
 
 // ─── Client handlers ─────────────────────────────────────────────────────────
 
 export async function handleStart(ctx) {
-  clearContext(ctx.chat.id);
   await ctx.reply(
-    "Добрый день! Я логистический менеджер по грузоперевозкам.\n\n" +
-    "Расскажите о вашем грузе — откуда, куда и что везём?"
+    "Добрый день! 👋\n\n" +
+    "Я помогаю искать грузы на FA-FA.KZ.\n\n" +
+    "Используйте /filter чтобы настроить фильтры и найти грузы.\n" +
+    "Используйте /monitor чтобы получать уведомления о новых грузах.\n\n" +
+    "/help — все команды"
   );
 }
 
 export async function handleText(ctx) {
-  const chatId = ctx.chat.id;
+  const chatId = String(ctx.chat.id);
   const userMessage = ctx.message.text;
   if (!userMessage?.trim()) return;
 
-  // If owner is setting a filter field — intercept
-  const awaitField = filterAwait.get(String(chatId));
-  if (awaitField && String(chatId) === String(MANAGER_CHAT_ID)) {
-    filterAwait.delete(String(chatId));
+  // If user is setting a filter field — intercept
+  const awaitField = filterAwait.get(chatId);
+  if (awaitField) {
+    filterAwait.delete(chatId);
     const value = userMessage.trim() === "-" ? null : userMessage.trim();
-    setFilter(awaitField, value);
+    await setFilter(chatId, awaitField, value);
     const labels = { from: "Откуда", to: "Куда", cargo: "Груз", truck_type: "Тип машины" };
     await ctx.reply(
-      `${value ? `✅ Фильтр «${labels[awaitField]}» установлен: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${buildFilterText()}`,
+      `${value ? `✅ Фильтр «${labels[awaitField]}» установлен: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${await buildFilterText(chatId)}`,
       { reply_markup: buildFilterKeyboard() }
     );
     return;
   }
 
-  await processMessage(ctx, chatId, userMessage);
+  await ctx.reply("Используйте /filter для поиска грузов или /help для списка команд.");
 }
 
 export async function handleVoice(ctx) {
-  const chatId = ctx.chat.id;
-  try {
-    const text = await transcribeVoice(ctx);
-    if (!text?.trim()) {
-      await ctx.reply("Не расслышал. Попробуйте ещё раз или напишите текстом.");
-      return;
-    }
-    await processMessage(ctx, chatId, text);
-  } catch (err) {
-    console.error("Voice transcription error:", err.message);
-    await ctx.reply("Что-то пошло не так, давайте попробуем ещё раз.");
-  }
+  await ctx.reply("Голосовые сообщения не поддерживаются. Используйте /filter для поиска грузов.");
 }
 
-async function processMessage(ctx, chatId, userText) {
-  try {
-    let messages = getContext(chatId) || [];
-    const isFirstMessage = messages.length === 0;
-
-    messages.push({ role: "user", content: userText });
-
-    // On first message inject known user data into context
-    if (isFirstMessage) {
-      const user = await getUser(ctx.from.id).catch(() => null);
-      if (user?.name || user?.phone) {
-        const parts = [];
-        if (user.name) parts.push(`Имя: ${user.name}`);
-        if (user.phone) parts.push(`Телефон: ${user.phone}`);
-        if (user.last_order_data) {
-          const d = user.last_order_data;
-          if (d.from) parts.push(`Прошлый маршрут: ${d.from} → ${d.to || "?"}`);
-        }
-        messages = [
-          {
-            role: "system",
-            content: `[Данные клиента из базы]\n${parts.join("\n")}\n\nУточни у клиента: оставляем прежние контакты или нужно изменить?`,
-          },
-          ...messages,
-        ];
-      }
-    }
-
-    const result = await chat(messages);
-
-    if (result.type === "function") {
-      const saved = await saveLead({ ...result.args, client_chat_id: ctx.chat.id });
-
-      await ctx.telegram.sendMessage(
-        MANAGER_CHAT_ID,
-        formatNotification(saved),
-        { reply_markup: buildKeyboard(saved) }
-      );
-
-      scheduleReminder(saved.id, 5 * 60 * 1000); // first reminder in 5 min, then every 5 min
-
-      // Save user profile for future orders
-      await upsertUser(ctx.from.id, {
-        name: result.args.sender_name,
-        phone: result.args.sender_phone,
-        lastOrderData: {
-          from: result.args.from,
-          to: result.args.to,
-          cargo: result.args.cargo,
-        },
-      }).catch(() => {});
-
-      await ctx.reply("Спасибо! Заявка принята 👍\nС вами скоро свяжутся.");
-      clearContext(chatId);
-      console.log(`Lead saved: ${saved.id}`);
-    } else {
-      messages.push({ role: "assistant", content: result.content });
-      setContext(chatId, messages);
-      await ctx.reply(result.content);
-    }
-  } catch (err) {
-    console.error("Processing error:", err.message, err.stack);
-    await ctx.reply("Что-то пошло не так, давайте попробуем ещё раз.");
-  }
-}
