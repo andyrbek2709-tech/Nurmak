@@ -178,65 +178,109 @@ async function fillSearchForm(page) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
 
-  // Helper: fill a text field and click its autocomplete suggestion
+  // DIAGNOSTIC: dump all form inputs to understand page structure
+  const formInputs = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("input, select")).map(el => ({
+      tag: el.tagName, name: el.name, type: el.type,
+      id: el.id, placeholder: el.placeholder, value: el.value,
+    }))
+  );
+  console.log("[FAFA] form inputs:", JSON.stringify(formInputs));
+
   const fillWithAutocomplete = async (label, value) => {
-    // Find input near label text
-    const inputHandle = await page.evaluate((lbl) => {
-      const cells = Array.from(document.querySelectorAll("td"));
-      const labelCell = cells.find(td => td.textContent.trim().startsWith(lbl));
-      const input = labelCell?.nextElementSibling?.querySelector("input");
-      return input ? true : false;
+    // Find the actual input next to the label td
+    const inputInfo = await page.evaluate((lbl) => {
+      const tds = Array.from(document.querySelectorAll("td"));
+      const labelTd = tds.find(td => td.textContent.trim().startsWith(lbl));
+      if (!labelTd) return null;
+      const sibling = labelTd.nextElementSibling;
+      const inp = sibling?.querySelector("input") || sibling?.querySelector("select");
+      if (!inp) return null;
+      return { name: inp.name, id: inp.id, type: inp.type };
     }, label);
+    console.log(`[FAFA] input for "${label}":`, JSON.stringify(inputInfo));
 
-    // Use locator with label context
-    const inputs = page.locator("td").filter({ hasText: label }).locator("~ td input").first();
-    const fallback = page.locator(`input[name='from'], input[name='from_city']`).first();
+    // Build selector for the target input
+    let inputSel = null;
+    if (inputInfo?.name) inputSel = `input[name="${inputInfo.name}"]`;
+    else if (inputInfo?.id) inputSel = `#${inputInfo.id}`;
 
-    let filled = false;
-    try {
-      await inputs.fill(value, { timeout: 3000 });
-      filled = true;
-    } catch (_) {
-      try { await fallback.fill(value, { timeout: 3000 }); filled = true; } catch (_2) {}
+    if (inputSel) {
+      try {
+        await page.click(inputSel, { timeout: 3000 });
+        await page.fill(inputSel, "");
+        await page.type(inputSel, value, { delay: 80 });
+        console.log(`[FAFA] typed "${value}" into ${inputSel}`);
+      } catch (e) {
+        console.log(`[FAFA] type failed for ${inputSel}: ${e.message}`);
+        inputSel = null;
+      }
     }
 
-    if (!filled) {
+    if (!inputSel) {
+      // Fallback: fill first empty visible text input
       await page.evaluate((v) => {
-        const all = Array.from(document.querySelectorAll("input[type='text']"));
-        // Find text inputs that are in the search form (not login)
-        for (const inp of all) {
-          if (!inp.value && inp.offsetParent) {
-            inp.value = v;
-            inp.dispatchEvent(new Event("input", { bubbles: true }));
-            break;
-          }
+        const inp = Array.from(document.querySelectorAll("input[type='text']"))
+          .find(el => !el.value && el.offsetParent);
+        if (inp) {
+          inp.focus(); inp.value = v;
+          ["input", "keyup", "change"].forEach(ev =>
+            inp.dispatchEvent(new Event(ev, { bubbles: true }))
+          );
         }
       }, value);
+      console.log(`[FAFA] fallback fill "${value}"`);
     }
 
-    console.log(`[FAFA] filled ${label}: "${value}", success=${filled}`);
-    await rand(1500, 2000);
+    await rand(2000, 2500); // wait for autocomplete dropdown
 
-    // Click any autocomplete suggestion that appeared
-    try {
-      await page.waitForSelector("input[name='load_search']", { timeout: 4000 });
-      const sugg = page.locator("input[name='load_search']").first();
-      const count = await sugg.count();
-      if (count > 0) {
-        const suggVal = await sugg.getAttribute("value");
-        await sugg.click({ force: true });
-        console.log(`[FAFA] clicked autocomplete for ${label}: "${suggVal}"`);
-        await rand(600, 1000);
+    // DIAGNOSTIC: what visible elements contain our text after typing?
+    const domInfo = await page.evaluate((v) => {
+      const found = [];
+      for (const el of document.querySelectorAll("*")) {
+        if (!el.offsetParent) continue;
+        if (el.children.length > 0) continue;
+        const txt = (el.textContent || "").trim();
+        if (txt && txt.toLowerCase().includes(v.toLowerCase()) && txt.length < 120) {
+          found.push({ tag: el.tagName, cls: (el.className || "").substring(0, 50),
+            name: el.getAttribute("name"), id: el.id,
+            val: el.value, text: txt.substring(0, 80) });
+        }
       }
-    } catch (_) {
-      console.log(`[FAFA] no autocomplete for ${label}`);
-    }
+      return found.slice(0, 10);
+    }, value);
+    console.log(`[FAFA] DOM after typing "${value}":`, JSON.stringify(domInfo));
+
+    // Try to click first visible suggestion from common autocomplete patterns
+    const suggClicked = await page.evaluate((v) => {
+      const selectors = [
+        "ul.ui-autocomplete li",
+        ".autocomplete-suggestion",
+        ".suggestions li", ".suggestions div",
+        "div.suggest li", "div.suggest div",
+        "[class*='autocomplete'] li", "[class*='autocomplete'] div",
+        "[class*='suggest'] li", "[class*='suggest'] div",
+        "div.dropdown-menu li",
+        "input[name='load_search']",
+      ];
+      for (const sel of selectors) {
+        const items = Array.from(document.querySelectorAll(sel))
+          .filter(el => el.offsetParent);
+        if (items.length > 0) {
+          items[0].click();
+          return `${sel} -> "${(items[0].textContent || items[0].value || "").trim().substring(0, 60)}"`;
+        }
+      }
+      return null;
+    });
+    console.log(`[FAFA] suggestion click: ${suggClicked}`);
+    await rand(800, 1200);
   };
 
   if (filters.from) await fillWithAutocomplete("Место погрузки", filters.from);
   if (filters.to) await fillWithAutocomplete("Место разгрузки", filters.to);
 
-  // Select truck type
+  // Select truck type via select element
   if (filters.truck_type) {
     await page.evaluate((truckType) => {
       const sel = document.querySelector("select[name='car_type'], select");
@@ -248,17 +292,23 @@ async function fillSearchForm(page) {
     }, filters.truck_type).catch(() => {});
   }
 
-  // Click the REAL search button (not autocomplete suggestions)
+  // DIAGNOSTIC: what does the form look like before submit?
+  const beforeSubmit = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("input[type='text'], input[type='hidden'], select"))
+      .filter(el => el.name)
+      .map(el => ({ name: el.name, value: el.value }))
+  );
+  console.log("[FAFA] form state before submit:", JSON.stringify(beforeSubmit));
+
+  // Submit search
   const clicked = await page.evaluate(() => {
     const btn = document.querySelector("input[name='car_search']");
-    if (btn) { btn.click(); return `input[name=car_search] value="${btn.value}"`; }
+    if (btn) { btn.click(); return `car_search clicked, value="${btn.value}"`; }
+    const btn2 = document.querySelector("input[type='submit'], button[type='submit']");
+    if (btn2) { btn2.click(); return `submit btn clicked: "${btn2.value || btn2.textContent}"`; }
     return null;
   });
   console.log(`[FAFA] search submit: ${clicked}`);
-
-  if (!clicked) {
-    await page.locator("input[name='car_search']").click({ force: true }).catch(() => {});
-  }
 
   await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
@@ -268,6 +318,16 @@ async function fillSearchForm(page) {
     console.log("[FAFA] waitForSelector tr td a timed out — proceeding anyway");
   }
   await rand(800, 1200);
+
+  // DIAGNOSTIC: what rows/links exist after submit?
+  const afterSubmit = await page.evaluate(() => {
+    const links = Array.from(document.querySelectorAll("a")).filter(a => a.textContent.includes("—"));
+    const rows = document.querySelectorAll("tr");
+    const html = document.body.innerHTML.substring(0, 1500);
+    return { rowCount: rows.length, dashLinks: links.slice(0, 5).map(a => a.textContent.trim()), html };
+  });
+  console.log(`[FAFA] after submit: rows=${afterSubmit.rowCount}, dashLinks=${JSON.stringify(afterSubmit.dashLinks)}`);
+  console.log("[FAFA] page HTML snippet:", afterSubmit.html);
   console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
 
