@@ -222,24 +222,18 @@ async function fillSearchForm(page) {
       console.log(`[FAFA] #${inputId}: no div.av1 for "${value}"`);
     }
 
+    // Get text of first visible suggestion
     const picked = await page.evaluate(() => {
-      const divs = Array.from(document.querySelectorAll("div.av1")).filter(d => d.offsetParent);
-      if (!divs.length) return null;
-      divs[0].click();
-      return divs[0].textContent.trim();
+      const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
+      return div ? div.textContent.trim() : null;
     });
 
-    if (!picked) {
-      // No city suggestion found — clear the input so form submits without this field
-      await page.evaluate((id) => {
-        const inp = document.getElementById(id);
-        if (!inp) return;
-        inp.value = "";
-        inp.dispatchEvent(new Event("change", { bubbles: true }));
-      }, inputId);
-      console.log(`[FAFA] #${inputId}: no suggestion, input cleared`);
+    if (picked) {
+      // Use Playwright native click so site's JS handler sets the hidden City field
+      await page.locator("div.av1").first().click();
+      console.log(`[FAFA] #${inputId} suggestion picked: "${picked}"`);
     } else {
-      console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
+      console.log(`[FAFA] #${inputId}: no suggestion for "${value}"`);
     }
 
     await rand(800, 1000);
