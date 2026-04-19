@@ -264,7 +264,7 @@ async function handleMonitor(ctx) {
       stopMonitoring();
       await ctx.reply("⏹ Мониторинг della.kz остановлен.");
     } else {
-      await ctx.reply("▶️ Мониторинг della.kz запущен. Проверка каждые 3 минуты.");
+      await ctx.reply("▶️ Мониторинг fa-fa.kz запущен. Проверка каждые 3 минуты.");
       startMonitoring().catch(err => {
         console.error("[DELLA] startMonitoring error:", err.message);
         ctx.telegram.sendMessage(MANAGER_CHAT_ID, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});

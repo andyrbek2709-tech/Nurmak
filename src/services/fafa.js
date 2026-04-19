@@ -180,7 +180,12 @@ async function doLogin(page) {
   await page.fill("input[type='password'], input[name='password'], #password", password).catch(() => {});
   await rand(500, 900);
 
-  await page.click("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button").catch(() => {});
+  // Force click handles elements outside viewport
+  const submitBtn = await page.$("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button").catch(() => null);
+  if (submitBtn) {
+    await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
+    await submitBtn.click({ force: true }).catch(() => {});
+  }
   await page.waitForLoadState("domcontentloaded");
   await rand(2000, 3000);
   console.log(`[FAFA] login done, URL: ${page.url()}`);
