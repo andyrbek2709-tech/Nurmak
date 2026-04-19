@@ -256,80 +256,63 @@ async function fillSearchForm(page, filters) {
 }
 
 async function extractItems(page) {
+  // Wait for "Найдено" text to appear (React renders after networkidle)
+  await page.waitForFunction(
+    () => document.body.innerText.includes("Найдено"),
+    { timeout: 8000 }
+  ).catch(() => {});
+
   return page.evaluate(() => {
-    const SEPS = ["→", "—", "–"];
-    const results = [];
+    // ATI.SU results format: each cargo block starts with a direction code like "KAZ-RUS"
+    // followed by: distance, truck type, weight/volume cargo, from city, date, to city, price
+    const DIRECTION = /^[A-Z]{2,3}-[A-Z]{2,3}$/;
+    const TRUCK_KW  = /тент|реф|изот|борт|конт|цист|любая|открыт|термос/i;
+    const WEIGHT_RE = /^\d[\d,]*\s*\/\s*\d/;   // "22,5 / 86 напитки"
+    const DATE_KW   = /^готов|^погрузка|апр\.|мар\.|фев\.|янв\.|май|июн\.|июл\.|авг\.|сен\.|окт\.|ноя\.|дек\./i;
+    const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
+    const SKIP      = /^#[A-Z0-9]+$|^Упорядочить|^Направл|^Транспорт|^Вес|^Маршрут|^Ставка|^Вид|^Выводить/i;
 
-    // Try structured card selectors first
-    const cardSelectors = [
-      ".cargo-item", ".load-item", "[data-test='cargo-row']", "[data-test='load-row']",
-      ".loads-list__item", "[class*='CargoItem']", "[class*='LoadItem']", "tr.result-row",
-    ];
-    let cards = [];
-    for (const sel of cardSelectors) {
-      cards = Array.from(document.querySelectorAll(sel));
-      if (cards.length > 0) break;
+    const bodyText = document.body.innerText || "";
+    const startIdx = bodyText.indexOf("Найдено ");
+    if (startIdx < 0) return [];
+
+    const lines = bodyText.substring(startIdx).split("\n")
+      .map(s => s.trim()).filter(Boolean);
+
+    // Split into blocks — each block starts with a direction code
+    const blocks = [];
+    let cur = null;
+    for (const line of lines) {
+      if (DIRECTION.test(line)) {
+        if (cur && cur.length > 3) blocks.push(cur);
+        cur = [line];
+      } else if (cur) {
+        if (!SKIP.test(line)) cur.push(line);
+      }
     }
+    if (cur && cur.length > 3) blocks.push(cur);
 
-    const parseCard = (text) => {
-      const lines = text.split("\n").map(s => s.trim()).filter(Boolean);
+    const results = [];
+    for (const block of blocks) {
+      const distance  = (block.find(l => /^\d[\d\s]*\s*км/.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
+      const truck_type = block.find(l => TRUCK_KW.test(l)) || "";
 
-      let from = "", to = "", distance = "";
-      for (const sep of SEPS) {
-        const routeLine = lines.find(l => l.includes(sep));
-        if (!routeLine) continue;
-        const idx = routeLine.indexOf(sep);
-        from = routeLine.substring(0, idx).trim();
-        const rest = routeLine.substring(idx + sep.length).trim();
-        const dm = rest.match(/([\d\s]+\s*км)/i);
-        distance = dm ? dm[1].trim() : "";
-        to = rest.replace(/\s*[\d\s]+\s*км.*$/i, "").trim();
-        break;
-      }
-      if (!from || !to || from.length > 70 || to.length > 70) return null;
+      // Weight/volume line: "22,5 / 86 напитки" or "23 / 82 ТНП"
+      const wLine  = block.find(l => WEIGHT_RE.test(l)) || "";
+      const weight = wLine.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
+      const cargo  = wLine.replace(/^[\d,. /\s]+/, "").trim() || "";
 
-      const weightM = text.match(/(\d[\d,. ]*)\s*т[^а-яёa-z]/i);
-      const weight = weightM ? weightM[0].trim() : "";
+      // Find the date line — the city before it is "from", the city after is "to"
+      const dateIdx = block.findIndex(l => DATE_KW.test(l) || /\d{1,2}[-–]\d{1,2}\s*(апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек)/i.test(l));
+      const from = dateIdx > 0 ? block[dateIdx - 1] : "";
+      const time = dateIdx >= 0 ? block[dateIdx] : "";
+      const to   = dateIdx >= 0 && dateIdx + 1 < block.length ? block[dateIdx + 1] : "";
 
-      const priceM = text.match(/[\d\s.,]+\s*(руб|тнг|₽|тг)[.,\s]*(нал|карт|безнал)?/i);
-      const price = priceM ? priceM[0].trim() : "";
+      const price = block.find(l => PRICE_KW.test(l)) || "";
 
-      const truckKw = ["тент", "реф", "изот", "борт", "конт", "цист", "любая", "открыт", "термос"];
-      const truck_type = lines.find(l => truckKw.some(t => l.toLowerCase().includes(t))) || "";
-
-      const dateM = text.match(/\d{1,2}[./]\d{1,2}([./]\d{2,4})?/);
-      const time = dateM ? dateM[0] : "";
-
-      const cargo = lines.find(l =>
-        l !== truck_type && l.length < 50 && !/^\d/.test(l) &&
-        !/(руб|тнг|км|нал|карт)/i.test(l) &&
-        !l.includes(from) && !l.includes(to)
-      ) || "";
-
-      return { from, to, distance, cargo, weight, truck_type, price, time };
-    };
-
-    if (cards.length > 0) {
-      for (const card of cards) {
-        const parsed = parseCard(card.innerText || "");
-        if (parsed) results.push(parsed);
-      }
-    } else {
-      // Fallback: find elements containing route separators
-      const els = Array.from(document.querySelectorAll("a, td, div, span")).filter(el => {
-        const t = el.textContent || "";
-        return SEPS.some(s => t.includes(s)) && t.length < 120 && t.length > 5;
-      });
-      for (const el of els) {
-        let container = el;
-        for (let i = 0; i < 5; i++) {
-          if (!container.parentElement) break;
-          const txt = container.parentElement.innerText || "";
-          if (txt.length > 30 && txt.length < 600) container = container.parentElement;
-          else break;
-        }
-        const parsed = parseCard(container.innerText || "");
-        if (parsed && parsed.from && parsed.to) results.push(parsed);
+      if (from && to && from !== to && from.length < 60 && to.length < 60
+          && !/^готов|^погрузка/i.test(from) && !/^готов|^погрузка/i.test(to)) {
+        results.push({ from, to, distance, cargo, weight, truck_type, price, time });
       }
     }
 
