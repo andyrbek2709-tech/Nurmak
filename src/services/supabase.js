@@ -2,23 +2,25 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-/**
- * Insert a lead into the leads table.
- * Returns the inserted row or throws on error.
- */
 export async function saveLead(leadData) {
   const row = {
-    from_city: leadData.from_city || null,
-    to_city: leadData.to_city || null,
+    from_city: leadData.from || null,
+    to_city: leadData.to || null,
     cargo: leadData.cargo || null,
     weight: leadData.weight || null,
     volume: leadData.volume || null,
-    date: leadData.date || null,
+    cargo_notes: leadData.cargo_notes || null,
+    date_loading: leadData.date_loading || null,
+    time_loading: leadData.time_loading || null,
+    time_unloading: leadData.time_unloading || null,
+    need_loading: leadData.need_loading || null,
+    need_unloading: leadData.need_unloading || null,
+    sender_name: leadData.sender_name || null,
+    sender_phone: leadData.sender_phone || null,
+    receiver_name: leadData.receiver_name || null,
+    receiver_phone: leadData.receiver_phone || null,
     transport_type: leadData.transport_type || null,
     urgency: leadData.urgency || null,
-    loading: leadData.loading || null,
-    name: leadData.name || null,
-    phone: leadData.phone || null,
     notes: leadData.notes || null,
   };
 
