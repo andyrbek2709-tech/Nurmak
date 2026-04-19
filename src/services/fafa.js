@@ -197,34 +197,29 @@ async function fillSearchForm(page) {
 
   console.log(`[FAFA] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
 
-  // Fill input and pick first autocomplete suggestion (div.av1)
+  // Fill input via JS events (triggers fa-fa.kz autocomplete), then pick div.av1
   const typeAndPickSuggestion = async (inputId, value) => {
-    // Remove overlay that may block the input
+    // Remove overlay
     await page.evaluate(() => {
       document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
     });
 
-    // Focus and clear via keyboard (avoids disrupting autocomplete state)
-    try {
-      await page.click(`#${inputId}`, { timeout: 3000 });
-      await page.keyboard.press("Control+a");
-      await page.keyboard.press("Delete");
-    } catch (_) {
-      // Fallback focus via JS
-      await page.evaluate((id) => {
-        const inp = document.getElementById(id);
-        if (inp) { inp.value = ""; inp.focus(); }
-      }, inputId);
-    }
+    // Set value and fire JS events — this is the ONLY approach confirmed to trigger div.av1
+    await page.evaluate(({ id, v }) => {
+      const inp = document.getElementById(id);
+      if (!inp) return;
+      inp.focus();
+      inp.value = v;
+      inp.dispatchEvent(new Event("input",  { bubbles: true }));
+      inp.dispatchEvent(new Event("keyup",  { bubbles: true }));
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    }, { id: inputId, v: value });
 
-    // Type value character by character to trigger autocomplete
-    await page.keyboard.type(value, { delay: 100 });
-
-    // Wait for div.av1 to appear
+    // Wait for div.av1 autocomplete dropdown
     try {
-      await page.waitForSelector("div.av1", { timeout: 5000 });
+      await page.waitForSelector("div.av1", { timeout: 6000 });
     } catch (_) {
-      console.log(`[FAFA] #${inputId}: no div.av1 appeared for "${value}"`);
+      console.log(`[FAFA] #${inputId}: no div.av1 for "${value}"`);
     }
 
     const picked = await page.evaluate(() => {
@@ -234,15 +229,6 @@ async function fillSearchForm(page) {
       return divs[0].textContent.trim();
     });
     console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
-
-    // Fallback: set value directly if no autocomplete
-    if (!picked) {
-      await page.evaluate(({ id, v }) => {
-        const inp = document.getElementById(id);
-        if (inp) { inp.value = v; inp.dispatchEvent(new Event("change", { bubbles: true })); }
-      }, { id: inputId, v: value });
-    }
-
     await rand(800, 1000);
     return picked;
   };
