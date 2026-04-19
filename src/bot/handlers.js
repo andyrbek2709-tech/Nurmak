@@ -5,6 +5,7 @@ import {
   saveLead, updateLeadStatus, getLeadById,
   getLeadsByStatus, getLeadsToday, normalizePhone,
 } from "../services/supabase.js";
+import { getUser, upsertUser } from "../services/users.js";
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
 
@@ -193,7 +194,30 @@ export async function handleVoice(ctx) {
 async function processMessage(ctx, chatId, userText) {
   try {
     let messages = getContext(chatId) || [];
+    const isFirstMessage = messages.length === 0;
+
     messages.push({ role: "user", content: userText });
+
+    // On first message inject known user data into context
+    if (isFirstMessage) {
+      const user = await getUser(ctx.from.id).catch(() => null);
+      if (user?.name || user?.phone) {
+        const parts = [];
+        if (user.name) parts.push(`Имя: ${user.name}`);
+        if (user.phone) parts.push(`Телефон: ${user.phone}`);
+        if (user.last_order_data) {
+          const d = user.last_order_data;
+          if (d.from) parts.push(`Прошлый маршрут: ${d.from} → ${d.to || "?"}`);
+        }
+        messages = [
+          {
+            role: "system",
+            content: `[Данные клиента из базы]\n${parts.join("\n")}\n\nУточни у клиента: оставляем прежние контакты или нужно изменить?`,
+          },
+          ...messages,
+        ];
+      }
+    }
 
     const result = await chat(messages);
 
@@ -211,6 +235,17 @@ async function processMessage(ctx, chatId, userText) {
         15 * 60 * 1000,
         `⏰ Напоминание: заявка ${saved.id.substring(0, 8)} не обработана уже 15 минут.`
       );
+
+      // Save user profile for future orders
+      await upsertUser(ctx.from.id, {
+        name: result.args.sender_name,
+        phone: result.args.sender_phone,
+        lastOrderData: {
+          from: result.args.from,
+          to: result.args.to,
+          cargo: result.args.cargo,
+        },
+      }).catch(() => {});
 
       await ctx.reply("Спасибо! Заявка принята 👍\nС вами скоро свяжутся.");
       clearContext(chatId);
