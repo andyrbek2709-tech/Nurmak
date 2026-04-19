@@ -90,6 +90,15 @@ export async function getLeadsByStatus(status) {
   return data || [];
 }
 
+export async function loadBotSetting(key) {
+  const { data } = await supabase.from("bot_settings").select("value").eq("key", key).maybeSingle();
+  return data?.value ?? null;
+}
+
+export async function saveBotSetting(key, value) {
+  await supabase.from("bot_settings").upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: "key" });
+}
+
 export async function getLeadsToday() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);

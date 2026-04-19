@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { loadBotSetting, saveBotSetting } from "./supabase.js";
 
 const FAFA_URL = "https://fa-fa.kz";
 const SEARCH_URL = `${FAFA_URL}/search_load/`;
@@ -13,15 +14,31 @@ let isRunning = false;
 // Filters set by manager via Telegram
 const filters = { from: null, to: null, cargo: null, truck_type: null };
 
-export function initFafa(bot, chatId) { _bot = bot; _chatId = chatId; }
+export function initFafa(bot, chatId) {
+  _bot = bot; _chatId = chatId;
+  // Load persisted filters on startup
+  loadBotSetting("filters").then(val => {
+    if (val) {
+      try {
+        const saved = JSON.parse(val);
+        Object.assign(filters, saved);
+        console.log("[FAFA] filters loaded from DB:", JSON.stringify(filters));
+      } catch (_) {}
+    }
+  }).catch(() => {});
+}
 export function isMonitoringActive() { return isRunning; }
 export function getFilters() { return { ...filters }; }
 export function setFilter(key, value) {
-  if (key in filters) filters[key] = value?.trim() || null;
+  if (key in filters) {
+    filters[key] = value?.trim() || null;
+    saveBotSetting("filters", JSON.stringify(filters)).catch(() => {});
+  }
 }
 export function clearFilters() {
   filters.from = null; filters.to = null;
   filters.cargo = null; filters.truck_type = null;
+  saveBotSetting("filters", JSON.stringify(filters)).catch(() => {});
 }
 
 export async function startMonitoring() {
@@ -178,22 +195,23 @@ async function fillSearchForm(page) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
 
-  // Type into input by id, remove any overlay, wait for div.av1 and click first suggestion
+  // Fill input and pick first autocomplete suggestion (div.av1)
   const typeAndPickSuggestion = async (inputId, value) => {
-    // Remove CSR overlay that blocks clicks
+    const sel = `#${inputId}`;
+
+    // Remove any overlay blocking the input
     await page.evaluate(() => {
       document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
     });
 
-    // Trigger autocomplete via JS events
-    await page.evaluate(({ id, v }) => {
-      const inp = document.getElementById(id);
-      if (!inp) return;
-      inp.focus();
-      inp.value = v;
-      inp.dispatchEvent(new InputEvent("input", { bubbles: true, data: v }));
-      inp.dispatchEvent(new Event("keyup", { bubbles: true }));
-    }, { id: inputId, v: value });
+    // Click + clear + type to trigger native autocomplete events
+    try {
+      await page.click(sel, { timeout: 4000, force: true });
+    } catch (_) {
+      await page.evaluate((id) => document.getElementById(id)?.focus(), inputId);
+    }
+    await page.fill(sel, "", { force: true }).catch(() => {});
+    await page.type(sel, value, { delay: 80 });
 
     await rand(2000, 2500);
 
@@ -204,6 +222,15 @@ async function fillSearchForm(page) {
       return divs[0].textContent.trim();
     });
     console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
+
+    // Fallback: ensure input value is set even without autocomplete pick
+    if (!picked) {
+      await page.evaluate(({ id, v }) => {
+        const inp = document.getElementById(id);
+        if (inp) { inp.value = v; inp.dispatchEvent(new Event("change", { bubbles: true })); }
+      }, { id: inputId, v: value });
+    }
+
     await rand(800, 1000);
     return picked;
   };
