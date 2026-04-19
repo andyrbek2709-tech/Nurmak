@@ -53,10 +53,28 @@ function makeKey(item) {
     .toLowerCase().replace(/\s+/g, "");
 }
 
+// Country name → ISO code mapping for filter matching
+const COUNTRY_ALIASES = {
+  "россия": "RU", "казахстан": "KZ", "беларусь": "BY", "беларуссия": "BY",
+  "узбекистан": "UZ", "кыргызстан": "KG", "киргизия": "KG",
+  "таджикистан": "TJ", "туркменистан": "TM", "азербайджан": "AZ",
+  "грузия": "GE", "армения": "AM", "китай": "CN",
+};
+
 function matchesFilters(item) {
-  if (filters.from && !item.from?.toLowerCase().includes(filters.from.toLowerCase())) return false;
-  if (filters.to && !item.to?.toLowerCase().includes(filters.to.toLowerCase())) return false;
-  if (filters.cargo && !item.cargo?.toLowerCase().includes(filters.cargo.toLowerCase())) return false;
+  const matches = (field, filterVal) => {
+    if (!filterVal) return true;
+    const val = field?.toLowerCase() || "";
+    const flt = filterVal.toLowerCase();
+    if (val.includes(flt)) return true;
+    // Try country alias (e.g. "Россия" → "RU")
+    const code = COUNTRY_ALIASES[flt];
+    if (code && val.includes(code.toLowerCase())) return true;
+    return false;
+  };
+  if (!matches(item.from, filters.from)) return false;
+  if (!matches(item.to, filters.to)) return false;
+  if (!matches(item.cargo, filters.cargo)) return false;
   return true;
 }
 
@@ -248,54 +266,55 @@ async function doLogin(page) {
 
 async function extractItems(page) {
   return page.evaluate(() => {
-    const selectors = [
-      ".cargo-item", ".load-item", ".order-item", ".search-item",
-      ".result-item", ".list-item", ".card", ".offer-item",
-      "table tbody tr", ".table tbody tr",
-      "[class*='cargo-row']", "[class*='load-row']", "[class*='item']",
-    ];
+    const results = [];
 
-    let rows = [];
-    for (const sel of selectors) {
-      const found = document.querySelectorAll(sel);
-      if (found.length > 1) { rows = Array.from(found); break; }
-    }
+    // fa-fa.kz /search_load/ structure:
+    // Table rows where second column contains a link: "Актау, KZ — Махачкала, RU - 1763 км"
+    // Weight/cargo in next column: "22т / 86м³\nНапитки"
+    // Date in first column
 
-    if (rows.length === 0) {
-      // Last resort: grab all table rows
-      rows = Array.from(document.querySelectorAll("tr")).filter(r => r.querySelectorAll("td").length >= 2);
-    }
-
-    const getText = (el, selList) => {
-      for (const s of selList) {
-        const f = el.querySelector(s);
-        if (f?.textContent?.trim()) return f.textContent.trim();
-      }
-      return "";
-    };
-
-    return rows.slice(0, 50).map(row => {
-      const cells = Array.from(row.querySelectorAll("td, .cell, [class*='col']"))
-        .map(c => c.textContent?.trim() || "");
-
-      return {
-        from: getText(row, ["[class*='from']", "[class*='origin']", "[class*='depart']", "[data-label*='от']"]) || cells[1] || "",
-        to: getText(row, ["[class*='to']", "[class*='dest']", "[class*='arrive']", "[data-label*='до']"]) || cells[2] || "",
-        cargo: getText(row, ["[class*='cargo']", "[class*='goods']", "[class*='груз']", "[class*='name']"]) || cells[3] || "",
-        weight: getText(row, ["[class*='weight']", "[class*='mass']", "[class*='вес']"]) || cells[4] || "",
-        time: getText(row, ["[class*='date']", "[class*='time']", "[class*='created']", "[class*='дата']"]) || cells[0] || "",
-      };
-    }).filter(i => {
-      // Filter out navigation/UI garbage
-      const text = `${i.from} ${i.to} ${i.cargo}`;
-      if (!i.from && !i.to && !i.cargo) return false;
-      if (text.length < 5) return false;
-      // Skip obviously navigation items
-      const junk = /закрыть|меню|пароль|copyright|соглашение|конфиденц|найти|онлайн|консультант|ошибка 404|карта сайта|автосайт/i;
-      if (junk.test(text)) return false;
-      // Require at least from or to to look like a real city (3+ chars)
-      const hasCity = (i.from?.length >= 3) || (i.to?.length >= 3);
-      return hasCity;
+    const rows = Array.from(document.querySelectorAll("tr")).filter(r => {
+      // Must have a link that looks like a route (contains " — ")
+      const link = r.querySelector("a");
+      return link && link.textContent.includes(" — ");
     });
+
+    for (const row of rows.slice(0, 60)) {
+      const cells = Array.from(row.querySelectorAll("td"));
+      if (cells.length < 2) continue;
+
+      // Find cell with route link
+      const routeCell = cells.find(td => td.querySelector("a")?.textContent.includes(" — "));
+      if (!routeCell) continue;
+
+      const routeText = routeCell.querySelector("a")?.textContent?.trim() || "";
+      // Parse "Актау, KZ — Махачкала, RU - 1763 км"
+      const dashIdx = routeText.indexOf(" — ");
+      const from = dashIdx >= 0 ? routeText.substring(0, dashIdx).trim() : "";
+      const toRaw = dashIdx >= 0 ? routeText.substring(dashIdx + 3).trim() : "";
+      // Remove distance "- 1763 км" from end
+      const to = toRaw.replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
+
+      // Date: first cell
+      const time = cells[0]?.textContent?.trim().split("\n")[0] || "";
+
+      // Weight + cargo: cell after route cell (or find by pattern "т / м³")
+      let weight = "", cargo = "";
+      for (const td of cells) {
+        const txt = td.textContent || "";
+        if (/\d+т\s*\/\s*\d+м³|\d+\s*т/.test(txt)) {
+          const lines = txt.trim().split("\n").map(s => s.trim()).filter(Boolean);
+          weight = lines[0] || "";
+          cargo = lines[1] || "";
+          break;
+        }
+      }
+
+      if (from && to) {
+        results.push({ from, to, cargo, weight, time });
+      }
+    }
+
+    return results;
   });
 }
