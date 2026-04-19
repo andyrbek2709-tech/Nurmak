@@ -77,22 +77,38 @@ function buildKeyboard(lead) {
 
 // ─── Reminders ───────────────────────────────────────────────────────────────
 
-function scheduleReminder(leadId, delayMs, text) {
-  const existing = reminders.get(leadId);
-  if (existing) clearTimeout(existing);
+const REPEAT_INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
 
-  const id = setTimeout(async () => {
-    reminders.delete(leadId);
+function cancelReminder(leadId) {
+  const existing = reminders.get(leadId);
+  if (existing) { clearTimeout(existing); reminders.delete(leadId); }
+}
+
+function scheduleReminder(leadId, firstDelayMs) {
+  cancelReminder(leadId);
+
+  const short = leadId.substring(0, 8);
+
+  const tick = async () => {
     try {
       const lead = await getLeadById(leadId);
-      if (lead.status === "new") {
-        await _bot.telegram.sendMessage(MANAGER_CHAT_ID, text);
-      }
+      if (lead.status !== "new") { reminders.delete(leadId); return; }
+
+      await _bot.telegram.sendMessage(
+        MANAGER_CHAT_ID,
+        `⏰ Заявка ${short} всё ещё не обработана! Примите решение.`
+      );
+
+      // Schedule next tick in 5 minutes
+      const id = setTimeout(tick, REPEAT_INTERVAL_MS);
+      reminders.set(leadId, id);
     } catch (err) {
       console.error("Reminder error:", err.message);
+      reminders.delete(leadId);
     }
-  }, delayMs);
+  };
 
+  const id = setTimeout(tick, firstDelayMs);
   reminders.set(leadId, id);
 }
 
@@ -112,18 +128,22 @@ async function handleCallback(ctx) {
   try {
     await ctx.answerCbQuery();
 
+    const msgId = ctx.callbackQuery.message.message_id;
+
     if (action === "accept") {
       await updateLeadStatus(id, "in_progress");
-      await ctx.telegram.editMessageReplyMarkup(chatId, ctx.callbackQuery.message.message_id, undefined, { inline_keyboard: [] });
+      cancelReminder(id);
+      await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
       await ctx.telegram.sendMessage(chatId, `✅ Заявка ${id.substring(0, 8)} принята в работу.`);
     } else if (action === "reject") {
       await updateLeadStatus(id, "canceled");
-      await ctx.telegram.editMessageReplyMarkup(chatId, ctx.callbackQuery.message.message_id, undefined, { inline_keyboard: [] });
+      cancelReminder(id);
+      await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
       await ctx.telegram.sendMessage(chatId, `❌ Заявка ${id.substring(0, 8)} отклонена.`);
     } else if (action === "delay") {
-      await ctx.telegram.editMessageReplyMarkup(chatId, ctx.callbackQuery.message.message_id, undefined, { inline_keyboard: [] });
-      await ctx.telegram.sendMessage(chatId, `⏸ Напомним через 30 минут.`);
-      scheduleReminder(id, 30 * 60 * 1000, `⏰ Напоминание: заявка ${id.substring(0, 8)} ещё ждёт обработки.`);
+      await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
+      await ctx.telegram.sendMessage(chatId, `⏸ Отложено. Напомним через 30 минут, затем каждые 5 минут.`);
+      scheduleReminder(id, 30 * 60 * 1000); // pause 30 min, then repeat every 5 min
     }
   } catch (err) {
     console.error("Callback error:", err.message, err.stack);
@@ -232,11 +252,7 @@ async function processMessage(ctx, chatId, userText) {
         { reply_markup: buildKeyboard(saved) }
       );
 
-      scheduleReminder(
-        saved.id,
-        15 * 60 * 1000,
-        `⏰ Напоминание: заявка ${saved.id.substring(0, 8)} не обработана уже 15 минут.`
-      );
+      scheduleReminder(saved.id, 5 * 60 * 1000); // first reminder in 5 min, then every 5 min
 
       // Save user profile for future orders
       await upsertUser(ctx.from.id, {
