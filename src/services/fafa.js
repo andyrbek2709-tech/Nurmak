@@ -117,33 +117,42 @@ async function tick() {
     const matched = fresh.filter(matchesFilters);
 
     for (const item of fresh) seenKeys.add(makeKey(item));
-    for (const item of matched) await notify(item);
 
-    if (matched.length > 0) console.log(`[FAFA] sent ${matched.length} notifications`);
+    if (matched.length > 0) {
+      for (const item of matched) await notify(item, true);
+      console.log(`[FAFA] sent ${matched.length} notifications`);
+    } else {
+      await _bot.telegram.sendMessage(_chatId, "🔍 Пока нет ничего нового").catch(e =>
+        console.error("[FAFA] sendMessage error:", e.message)
+      );
+    }
   } catch (err) {
     console.error("[FAFA] tick error:", err.message);
   }
   if (isRunning) monitorTimer = setTimeout(tick, CHECK_INTERVAL_MS);
 }
 
-async function notify(item) {
+async function notify(item, isNew = false) {
   if (!_bot || !_chatId) return;
-  const text = buildMessage(item);
+  const text = buildMessage(item, { isNew });
   await _bot.telegram.sendMessage(_chatId, text).catch(e =>
     console.error("[FAFA] sendMessage error:", e.message)
   );
 }
 
-export function buildMessage(item) {
+export function buildMessage(item, opts = {}) {
+  const header = opts.isNew ? "🆕 Новое направление (FA-FA)" : "🚛 Заявка FA-FA";
+  const distPart = item.distance ? ` (${item.distance})` : "";
   return [
-    `🚛 Новая заявка (FA-FA)`,
+    header,
     ``,
-    `📍 ${item.from || "—"} → ${item.to || "—"}`,
+    `📍 ${item.from || "—"} → ${item.to || "—"}${distPart}`,
     `📦 ${item.cargo || "—"}`,
     `🚛 ${item.truck_type || "—"}`,
     `⚖ ${item.weight || "—"}`,
+    item.price ? `💰 ${item.price}` : null,
     `🕒 ${item.time || "—"}`,
-  ].join("\n");
+  ].filter(l => l !== null).join("\n");
 }
 
 // ─── Scraper ──────────────────────────────────────────────────────────────────
@@ -383,8 +392,11 @@ async function extractItems(page) {
         const idx = txt.indexOf(sep);
         if (idx >= 0) {
           const from = txt.substring(0, idx).trim();
-          const to = txt.substring(idx + sep.length).trim().replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
-          return { from, to };
+          const rest = txt.substring(idx + sep.length).trim();
+          const distMatch = rest.match(/-\s*([\d\s]+\s*км)/i);
+          const distance = distMatch ? distMatch[1].replace(/\s+/g, " ").trim() : "";
+          const to = rest.replace(/\s*-\s*[\d\s]+\s*км.*$/i, "").trim();
+          return { from, to, distance };
         }
       }
       return null;
@@ -420,6 +432,10 @@ async function extractItems(page) {
       const cellLines = (trCell?.innerText || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
       const truck_type = cellLines.find(l => /тент|рефр|изот|борт|конт|цист|любая|открыт/i.test(l)) || cellLines[1] || "";
 
+      // Price: look in dateCell lines for price pattern
+      const dateCellLines = (dateCell?.innerText || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
+      const price = dateCellLines.find(l => /руб\.|тнг\.|нал|карту/.test(l)) || "";
+
       // Weight and cargo — use innerText to preserve line breaks
       let weight = "", cargo = "";
       for (const td of cells) {
@@ -432,7 +448,7 @@ async function extractItems(page) {
         }
       }
 
-      results.push({ from: route.from, to: route.to, cargo, weight, truck_type, time });
+      results.push({ from: route.from, to: route.to, distance: route.distance || "", cargo, weight, truck_type, time, price });
     }
 
     // Deduplicate by from+to+time+truck_type
