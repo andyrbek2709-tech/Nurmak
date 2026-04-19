@@ -1,7 +1,13 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { File } from "node:buffer";
 import OpenAI from "openai";
+
+// Polyfill required by OpenAI SDK on Node.js 18
+if (typeof globalThis.File === "undefined") {
+  globalThis.File = File;
+}
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
