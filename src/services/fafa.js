@@ -195,25 +195,37 @@ async function fillSearchForm(page) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
 
+  console.log(`[FAFA] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
+
   // Fill input and pick first autocomplete suggestion (div.av1)
   const typeAndPickSuggestion = async (inputId, value) => {
-    const sel = `#${inputId}`;
-
-    // Remove any overlay blocking the input
+    // Remove overlay that may block the input
     await page.evaluate(() => {
       document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
     });
 
-    // Click + clear + type to trigger native autocomplete events
+    // Focus and clear via keyboard (avoids disrupting autocomplete state)
     try {
-      await page.click(sel, { timeout: 4000, force: true });
+      await page.click(`#${inputId}`, { timeout: 3000 });
+      await page.keyboard.press("Control+a");
+      await page.keyboard.press("Delete");
     } catch (_) {
-      await page.evaluate((id) => document.getElementById(id)?.focus(), inputId);
+      // Fallback focus via JS
+      await page.evaluate((id) => {
+        const inp = document.getElementById(id);
+        if (inp) { inp.value = ""; inp.focus(); }
+      }, inputId);
     }
-    await page.fill(sel, "", { force: true }).catch(() => {});
-    await page.type(sel, value, { delay: 80 });
 
-    await rand(2000, 2500);
+    // Type value character by character to trigger autocomplete
+    await page.keyboard.type(value, { delay: 100 });
+
+    // Wait for div.av1 to appear
+    try {
+      await page.waitForSelector("div.av1", { timeout: 5000 });
+    } catch (_) {
+      console.log(`[FAFA] #${inputId}: no div.av1 appeared for "${value}"`);
+    }
 
     const picked = await page.evaluate(() => {
       const divs = Array.from(document.querySelectorAll("div.av1")).filter(d => d.offsetParent);
@@ -223,7 +235,7 @@ async function fillSearchForm(page) {
     });
     console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
 
-    // Fallback: ensure input value is set even without autocomplete pick
+    // Fallback: set value directly if no autocomplete
     if (!picked) {
       await page.evaluate(({ id, v }) => {
         const inp = document.getElementById(id);
