@@ -20,9 +20,8 @@ export function registerHandlers(bot) {
   initFafa(bot, MANAGER_CHAT_ID);
 
   bot.start(handleStart);
-  bot.on("text", handleText);
-  bot.on("voice", handleVoice);
 
+  // Commands must be registered before bot.on("text") — Telegraf runs middleware in order
   bot.command("new", (ctx) => handleOwnerList(ctx, "new", "🆕 Новые заявки"));
   bot.command("active", (ctx) => handleOwnerList(ctx, "in_progress", "🔄 В работе"));
   bot.command("today", handleOwnerToday);
@@ -30,6 +29,8 @@ export function registerHandlers(bot) {
   bot.command("filter", handleFilter);
   bot.command("help", handleHelp);
 
+  bot.on("text", handleText);
+  bot.on("voice", handleVoice);
   bot.on("callback_query", handleCallback);
 }
 
