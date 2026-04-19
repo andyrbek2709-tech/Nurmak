@@ -251,13 +251,13 @@ async function fillSearchForm(page) {
     }, value);
     console.log(`[FAFA] DOM after typing "${value}":`, JSON.stringify(domInfo));
 
-    // Try to click first visible suggestion from common autocomplete patterns
+    // Click first visible suggestion — fa-fa.kz uses div.av1
     const suggClicked = await page.evaluate((v) => {
       const selectors = [
+        "div.av1",
         "ul.ui-autocomplete li",
         ".autocomplete-suggestion",
         ".suggestions li", ".suggestions div",
-        "div.suggest li", "div.suggest div",
         "[class*='autocomplete'] li", "[class*='autocomplete'] div",
         "[class*='suggest'] li", "[class*='suggest'] div",
         "div.dropdown-menu li",
@@ -279,6 +279,18 @@ async function fillSearchForm(page) {
 
   if (filters.from) await fillWithAutocomplete("Место погрузки", filters.from);
   if (filters.to) await fillWithAutocomplete("Место разгрузки", filters.to);
+
+  // city_end is often hidden — set via JS directly as well
+  if (filters.to) {
+    await page.evaluate((v) => {
+      const inp = document.querySelector("input[name='city_end']");
+      if (inp) {
+        inp.value = v;
+        ["input", "change"].forEach(ev => inp.dispatchEvent(new Event(ev, { bubbles: true })));
+      }
+    }, filters.to);
+    console.log(`[FAFA] city_end set via JS: "${filters.to}"`);
+  }
 
   // Select truck type via select element
   if (filters.truck_type) {
@@ -378,38 +390,80 @@ async function doLogin(page) {
 }
 
 async function extractItems(page) {
+  // Dump first result rows to understand HTML structure
+  const diagnostic = await page.evaluate(() => {
+    const rows = Array.from(document.querySelectorAll("tr"));
+    const sample = rows.slice(0, 8).map(r => r.outerHTML.substring(0, 500));
+    const links = Array.from(document.querySelectorAll("a"))
+      .filter(a => a.textContent.trim().length > 2)
+      .slice(0, 20)
+      .map(a => a.textContent.trim().substring(0, 80));
+    return { rowCount: rows.length, sample, links };
+  });
+  console.log("[FAFA] row sample:", JSON.stringify(diagnostic.sample).substring(0, 3000));
+  console.log("[FAFA] all links:", JSON.stringify(diagnostic.links));
+
   return page.evaluate(() => {
     const results = [];
+    const SEPS = ["—", "→", " - ", " – "];
+
+    function hasSep(txt) { return SEPS.some(s => txt.includes(s)); }
+    function splitBySep(txt) {
+      for (const sep of SEPS) {
+        const idx = txt.indexOf(sep);
+        if (idx >= 0) return [txt.substring(0, idx).trim(), txt.substring(idx + sep.length).trim(), sep];
+      }
+      return [txt, "", ""];
+    }
 
     const rows = Array.from(document.querySelectorAll("tr")).filter(r => {
-      const link = r.querySelector("a");
-      return link && link.textContent.includes(" — ");
+      const links = r.querySelectorAll("a");
+      if (!links.length) return false;
+      // Accept if any link text has a separator OR if row has 2+ city links
+      for (const a of links) {
+        if (hasSep(a.textContent)) return true;
+      }
+      // Also accept rows with 2+ non-empty links (separate from/to cells)
+      const nonEmpty = Array.from(links).filter(a => a.textContent.trim().length > 2);
+      return nonEmpty.length >= 2;
     });
 
-    for (const row of rows.slice(0, 60)) {
+    for (const row of rows.slice(0, 80)) {
       const cells = Array.from(row.querySelectorAll("td"));
       if (cells.length < 2) continue;
 
-      const routeCell = cells.find(td => td.querySelector("a")?.textContent.includes(" — "));
-      if (!routeCell) continue;
+      let from = "", to = "", truck_type = "", weight = "", cargo = "", time = "";
 
-      const routeText = routeCell.querySelector("a")?.textContent?.trim() || "";
-      const dashIdx = routeText.indexOf(" — ");
-      const from = dashIdx >= 0 ? routeText.substring(0, dashIdx).trim() : "";
-      const toRaw = dashIdx >= 0 ? routeText.substring(dashIdx + 3).trim() : "";
-      const to = toRaw.replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
+      // Try: single link with separator "from — to"
+      const routeCell = cells.find(td => {
+        const a = td.querySelector("a");
+        return a && hasSep(a.textContent);
+      });
 
-      const time = cells[0]?.textContent?.trim().split("\n")[0] || "";
+      if (routeCell) {
+        const routeText = routeCell.querySelector("a").textContent.trim();
+        const [f, t] = splitBySep(routeText);
+        from = f;
+        to = t.replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
+        const lines = routeCell.textContent.trim().split("\n").map(s => s.trim()).filter(Boolean);
+        truck_type = lines[1] || "";
+      } else {
+        // Try: from and to are in separate links / tds
+        const cityLinks = Array.from(row.querySelectorAll("a"))
+          .filter(a => a.textContent.trim().length > 2);
+        if (cityLinks.length >= 2) {
+          from = cityLinks[0].textContent.trim();
+          to = cityLinks[1].textContent.trim().replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
+        } else if (cityLinks.length === 1) {
+          from = cityLinks[0].textContent.trim();
+        }
+      }
 
-      // Truck type: first line of route cell below the link
-      const routeCellLines = routeCell.textContent?.trim().split("\n").map(s => s.trim()).filter(Boolean) || [];
-      const truck_type = routeCellLines[1] || ""; // e.g. "рефр. (зад)", "тент (зад)"
+      time = cells[0]?.textContent?.trim().split("\n")[0] || "";
 
-      // Weight + cargo
-      let weight = "", cargo = "";
       for (const td of cells) {
         const txt = td.textContent || "";
-        if (/\d+т\s*\/\s*\d+м³|\d+\s*т/.test(txt)) {
+        if (/\d+\s*т/.test(txt) || /\d+\s*м[³3]/.test(txt)) {
           const lines = txt.trim().split("\n").map(s => s.trim()).filter(Boolean);
           weight = lines[0] || "";
           cargo = lines[1] || "";
@@ -417,9 +471,16 @@ async function extractItems(page) {
         }
       }
 
-      if (from && to) results.push({ from, to, cargo, weight, truck_type, time });
+      if (from && from.length > 1) results.push({ from, to, cargo, weight, truck_type, time });
     }
 
-    return results;
+    // Deduplicate
+    const seen = new Set();
+    return results.filter(it => {
+      const k = `${it.from}|${it.to}`.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
   });
 }
