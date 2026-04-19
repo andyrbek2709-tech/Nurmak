@@ -27,10 +27,12 @@ if (process.env.WEBHOOK_DOMAIN) {
   app.use(bot.webhookCallback(webhookPath));
 
   const webhookUrl = `${process.env.WEBHOOK_DOMAIN}${webhookPath}`;
+
+  await new Promise((resolve) => app.listen(PORT, resolve));
+  console.log(`Server running on port ${PORT}`);
+
   await bot.telegram.setWebhook(webhookUrl);
   console.log(`Webhook set: ${webhookUrl}`);
-
-  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 } else {
   // Long-polling mode (local dev without ngrok)
   await bot.telegram.deleteWebhook();
