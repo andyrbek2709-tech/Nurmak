@@ -165,34 +165,57 @@ async function doLogin(page) {
   const password = process.env.FAFA_PASSWORD;
   if (!login || !password) throw new Error("FAFA_LOGIN / FAFA_PASSWORD env vars missing");
 
-  console.log("[FAFA] logging in...");
+  console.log(`[FAFA] login start, URL: ${page.url()}`);
+
+  // Log what inputs are visible on page
+  const inputInfo = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll("input")).map(i =>
+      `type=${i.type} name=${i.name} id=${i.id} class=${i.className}`
+    ).join(" | ");
+  });
+  console.log(`[FAFA] inputs found: ${inputInfo || "none"}`);
 
   // Click login link if present
   const loginLink = await page.$("a[href*='login'], a[href*='signin'], a[href*='enter'], .login-btn, .btn-login").catch(() => null);
-  if (loginLink) { await loginLink.click(); await rand(1000, 1500); }
-
-  // Fill credentials
-  await page.fill(
-    "input[name='login'], input[name='email'], input[name='username'], input[type='email'], #login, #email",
-    login
-  ).catch(() => {});
-  await rand(500, 900);
-  await page.fill("input[type='password'], input[name='password'], #password", password).catch(() => {});
-  await rand(500, 900);
-
-  // Click via JS to bypass Playwright's viewport/visibility checks
-  const clicked = await page.evaluate(() => {
-    const btn = document.querySelector("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button");
-    if (btn) { btn.click(); return true; }
-    return false;
-  });
-
-  if (!clicked) {
-    // Fallback: press Enter in password field
-    await page.press("input[type='password'], input[name='password'], #password", "Enter").catch(() => {});
+  if (loginLink) {
+    console.log("[FAFA] clicking login link...");
+    await loginLink.click();
+    await rand(1000, 1500);
+    console.log(`[FAFA] after login link, URL: ${page.url()}`);
   }
 
-  await page.waitForLoadState("domcontentloaded");
+  // Fill login
+  const loginFilled = await page.evaluate((val) => {
+    const input = document.querySelector("input[name='login'], input[name='email'], input[name='username'], input[type='email'], #login, #email");
+    if (input) { input.value = val; input.dispatchEvent(new Event("input", { bubbles: true })); return input.name || input.type; }
+    return null;
+  }, login);
+  console.log(`[FAFA] login field filled: ${loginFilled}`);
+  await rand(500, 900);
+
+  // Fill password
+  const passFilled = await page.evaluate((val) => {
+    const input = document.querySelector("input[type='password'], input[name='password'], #password");
+    if (input) { input.value = val; input.dispatchEvent(new Event("input", { bubbles: true })); return "password"; }
+    return null;
+  }, password);
+  console.log(`[FAFA] password field filled: ${passFilled}`);
+  await rand(500, 900);
+
+  // Click submit via JS
+  const clicked = await page.evaluate(() => {
+    const btn = document.querySelector("button[type='submit'], input[type='submit'], .btn-login, .login-submit, form button");
+    if (btn) { btn.click(); return btn.tagName + " " + (btn.className || btn.type); }
+    return null;
+  });
+  console.log(`[FAFA] submit clicked: ${clicked}`);
+
+  if (!clicked) {
+    await page.keyboard.press("Enter").catch(() => {});
+    console.log("[FAFA] fallback: pressed Enter");
+  }
+
+  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
   await rand(2000, 3000);
   console.log(`[FAFA] login done, URL: ${page.url()}`);
 }
