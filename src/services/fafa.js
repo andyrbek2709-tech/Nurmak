@@ -136,19 +136,21 @@ async function scrape() {
     const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
     if (!hasAuth) await doLogin(page);
 
-    // Try known cargo page paths
-    const cargoPaths = ["/loads", "/cargoes", "/cargo", "/search", "/board"];
+    // Try known cargo page paths for fa-fa.kz
+    const cargoPaths = ["/cargoes/", "/cargo/", "/cargos/", "/gruz/", "/zayvki/", "/loads/", "/"];
     let loaded = false;
     for (const path of cargoPaths) {
       try {
         const resp = await page.goto(`${FAFA_URL}${path}`, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const status = resp?.status();
+        console.log(`[FAFA] tried ${path} → status ${status}`);
         if (resp && resp.ok()) { loaded = true; break; }
       } catch (_) { /* try next */ }
       await rand(500, 800);
     }
 
     if (!loaded) {
-      console.log("[FAFA] Could not find cargo page, staying on:", page.url());
+      console.log("[FAFA] Could not find cargo page, current URL:", page.url());
     }
 
     await rand(2000, 3000);
@@ -184,19 +186,16 @@ async function doLogin(page) {
   }
 
   // Fill fields via JS evaluate — avoids all Playwright viewport/actionability checks
+  // fa-fa.kz uses: name=login (login), name=pass1 (password), name=sbm (submit)
   await page.evaluate(({ l, p }) => {
-    const loginInput = document.querySelector(
-      "input[name='login'], input[name='email'], input[name='username'], input[type='email'], #login, #email"
-    );
-    const passInput = document.querySelector(
-      "input[type='password'], input[name='password'], #password"
-    );
     const fire = (el, val) => {
       el.focus();
       el.value = val;
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     };
+    const loginInput = document.querySelector("input[name='login']");
+    const passInput = document.querySelector("input[name='pass1'], input[type='password'], input[name='password']");
     if (loginInput) fire(loginInput, l);
     if (passInput) fire(passInput, p);
   }, { l: login, p: password });
@@ -204,26 +203,26 @@ async function doLogin(page) {
   console.log("[FAFA] credentials filled");
   await rand(800, 1200);
 
-  // Submit: try form.submit() first (most reliable, bypasses all viewport issues)
+  // Submit the LOGIN form specifically (by finding form that contains name=sbm)
   const submitted = await page.evaluate(() => {
-    const form = document.querySelector("form");
-    if (form) { form.submit(); return "form.submit()"; }
-    // Fallback: JS click on button
-    const btn = document.querySelector("button[type='submit'], input[type='submit'], form button");
-    if (btn) { btn.click(); return "btn.click()"; }
+    // Target the login submit button specifically
+    const sbm = document.querySelector("input[name='sbm']");
+    if (sbm) { sbm.click(); return "input[name=sbm].click()"; }
+    // Fallback: find form containing pass1 and submit it
+    const passInput = document.querySelector("input[name='pass1'], input[type='password']");
+    if (passInput?.form) { passInput.form.submit(); return "passInput.form.submit()"; }
     return null;
   });
   console.log(`[FAFA] submit method: ${submitted}`);
 
-  // Fallback: Enter key on password field via locator
-  if (!submitted) {
-    await page.locator("input[type='password'], input[name='password']").press("Enter").catch(() => {});
-    console.log("[FAFA] fallback: pressed Enter");
-  }
-
   await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
   await rand(2000, 3000);
-  console.log(`[FAFA] login done, URL: ${page.url()}`);
+
+  const afterUrl = page.url();
+  console.log(`[FAFA] login done, URL: ${afterUrl}`);
+  if (afterUrl.includes("/login")) {
+    throw new Error(`Login failed — redirected back to login page. Check credentials.`);
+  }
 }
 
 async function extractItems(page) {
