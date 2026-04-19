@@ -256,73 +256,86 @@ async function fillSearchForm(page, filters) {
 }
 
 async function extractItems(page) {
-  // Wait for "Найдено" text to appear (React renders after networkidle)
   await page.waitForFunction(
     () => document.body.innerText.includes("Найдено"),
     { timeout: 8000 }
   ).catch(() => {});
 
-  return page.evaluate(() => {
-    // ATI.SU results format: each cargo block starts with a direction code like "KAZ-RUS"
-    // followed by: distance, truck type, weight/volume cargo, from city, date, to city, price
+  const { items, debugBlocks } = await page.evaluate(() => {
     const DIRECTION = /^[A-Z]{2,3}-[A-Z]{2,3}$/;
     const TRUCK_KW  = /тент|реф|изот|борт|конт|цист|любая|открыт|термос/i;
-    const WEIGHT_RE = /^\d[\d,]*\s*\/\s*\d/;   // "22,5 / 86 напитки"
-    const DATE_KW   = /^готов|^погрузка|апр\.|мар\.|фев\.|янв\.|май|июн\.|июл\.|авг\.|сен\.|окт\.|ноя\.|дек\./i;
+    const WEIGHT_RE = /^\d[\d,]*\s*\/\s*\d/;
+    // Date keywords — NOT anchored so they match anywhere in line
+    const DATE_KW   = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
     const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
     const SKIP      = /^#[A-Z0-9]+$|^Упорядочить|^Направл|^Транспорт|^Вес|^Маршрут|^Ставка|^Вид|^Выводить/i;
 
     const bodyText = document.body.innerText || "";
     const startIdx = bodyText.indexOf("Найдено ");
-    if (startIdx < 0) return [];
+    if (startIdx < 0) return { items: [], debugBlocks: [] };
 
     const lines = bodyText.substring(startIdx).split("\n")
       .map(s => s.trim()).filter(Boolean);
 
-    // Split into blocks — each block starts with a direction code
     const blocks = [];
     let cur = null;
     for (const line of lines) {
       if (DIRECTION.test(line)) {
-        if (cur && cur.length > 3) blocks.push(cur);
+        if (cur) blocks.push(cur);
         cur = [line];
       } else if (cur) {
         if (!SKIP.test(line)) cur.push(line);
       }
     }
-    if (cur && cur.length > 3) blocks.push(cur);
+    if (cur) blocks.push(cur);
 
     const results = [];
     for (const block of blocks) {
       const distance  = (block.find(l => /^\d[\d\s]*\s*км/.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
       const truck_type = block.find(l => TRUCK_KW.test(l)) || "";
 
-      // Weight/volume line: "22,5 / 86 напитки" or "23 / 82 ТНП"
       const wLine  = block.find(l => WEIGHT_RE.test(l)) || "";
       const weight = wLine.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
       const cargo  = wLine.replace(/^[\d,. /\s]+/, "").trim() || "";
 
-      // Find the date line — the city before it is "from", the city after is "to"
-      const dateIdx = block.findIndex(l => DATE_KW.test(l) || /\d{1,2}[-–]\d{1,2}\s*(апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек)/i.test(l));
-      const from = dateIdx > 0 ? block[dateIdx - 1] : "";
-      const time = dateIdx >= 0 ? block[dateIdx] : "";
-      const to   = dateIdx >= 0 && dateIdx + 1 < block.length ? block[dateIdx + 1] : "";
+      const dateIdx = block.findIndex(l => DATE_KW.test(l));
+      let from = "", time = "";
 
+      if (dateIdx >= 0) {
+        const dateLine = block[dateIdx];
+        // Handle merged format "Актауготов 19 апр." — city name glued to date keyword
+        // Lazy match: uppercase Cyrillic start, then letters until date keyword
+        const merged = dateLine.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
+        if (merged && merged[1].trim().length >= 2) {
+          from = merged[1].trim();
+          time = dateLine.substring(merged[1].length).trim();
+        } else {
+          from = dateIdx > 0 ? block[dateIdx - 1] : "";
+          time = dateLine;
+        }
+      }
+
+      const to = dateIdx >= 0 && dateIdx + 1 < block.length ? block[dateIdx + 1] : "";
       const price = block.find(l => PRICE_KW.test(l)) || "";
 
-      if (from && to && from !== to && from.length < 60 && to.length < 60
-          && !/^готов|^погрузка/i.test(from) && !/^готов|^погрузка/i.test(to)) {
+      // Validate: from/to must look like city names (start with uppercase Cyrillic)
+      const isCity = s => /^[А-ЯЁ]/.test(s) && s.length < 60;
+      if (from && to && from !== to && isCity(from) && isCity(to)) {
         results.push({ from, to, distance, cargo, weight, truck_type, price, time });
       }
     }
 
-    // Deduplicate
     const seen = new Set();
-    return results.filter(it => {
+    const deduped = results.filter(it => {
       const k = `${it.from}|${it.to}|${it.time}|${it.truck_type}`.toLowerCase().replace(/\s/g, "");
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
     });
+
+    return { items: deduped, debugBlocks: blocks.slice(0, 3).map(b => b.slice(0, 12)) };
   });
+
+  console.log(`[ATISU] parsed ${items.length} items, blocks[0..2]:`, JSON.stringify(debugBlocks));
+  return items;
 }
