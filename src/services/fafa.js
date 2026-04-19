@@ -186,14 +186,14 @@ async function fillSearchForm(page) {
     });
 
     // Trigger autocomplete via JS events
-    await page.evaluate((id, v) => {
+    await page.evaluate(({ id, v }) => {
       const inp = document.getElementById(id);
       if (!inp) return;
       inp.focus();
       inp.value = v;
       inp.dispatchEvent(new InputEvent("input", { bubbles: true, data: v }));
       inp.dispatchEvent(new Event("keyup", { bubbles: true }));
-    }, inputId, value);
+    }, { id: inputId, v: value });
 
     await rand(2000, 2500);
 
