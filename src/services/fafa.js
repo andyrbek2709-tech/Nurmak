@@ -410,18 +410,20 @@ async function extractItems(page) {
       if (!row) continue;
 
       const cells = Array.from(row.querySelectorAll("td"));
-      const time = cells[0]?.textContent?.trim().split("\n")[0] || "";
+      // Find the date cell by looking for a dd.mm date pattern (skip checkbox cells)
+      const dateCell = cells.find(td => /\d{2}\.\d{2}/.test(td.innerText || ""));
+      const time = dateCell?.innerText?.trim().split("\n")[0] || "";
 
-      // Truck type: look for type keywords in the link's parent cell text
+      // Truck type: use innerText so <br> tags become newlines
       let trCell = link.parentElement;
       while (trCell && trCell.tagName !== "TD") trCell = trCell.parentElement;
-      const cellLines = (trCell?.textContent || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
+      const cellLines = (trCell?.innerText || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
       const truck_type = cellLines.find(l => /тент|рефр|изот|борт|конт|цист|любая|открыт/i.test(l)) || cellLines[1] || "";
 
-      // Weight and cargo
+      // Weight and cargo — use innerText to preserve line breaks
       let weight = "", cargo = "";
       for (const td of cells) {
-        const txt = td.textContent || "";
+        const txt = td.innerText || "";
         if (/\d+\s*т[^а-яa-z]/.test(txt) || /\d+\s*м[³3]/.test(txt)) {
           const lines = txt.trim().split("\n").map(s => s.trim()).filter(s => s && s.length < 60);
           weight = lines[0] || "";
@@ -433,10 +435,10 @@ async function extractItems(page) {
       results.push({ from: route.from, to: route.to, cargo, weight, truck_type, time });
     }
 
-    // Deduplicate by from+to+time
+    // Deduplicate by from+to+time+truck_type
     const seen = new Set();
     return results.filter(it => {
-      const k = `${it.from}|${it.to}|${it.time}`.toLowerCase().replace(/\s/g, "");
+      const k = `${it.from}|${it.to}|${it.time}|${it.truck_type}`.toLowerCase().replace(/\s/g, "");
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
