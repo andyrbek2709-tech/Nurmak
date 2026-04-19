@@ -28,6 +28,7 @@ export function registerHandlers(bot) {
   bot.command("today", handleOwnerToday);
   bot.command("monitor", handleMonitor);
   bot.command("filter", handleFilter);
+  bot.command("help", handleHelp);
 
   bot.on("callback_query", handleCallback);
 }
@@ -271,6 +272,49 @@ async function handleMonitor(ctx) {
   } catch (err) {
     console.error("Monitor command error:", err.message);
     await ctx.reply(`❌ Ошибка: ${err.message}`);
+  }
+}
+
+async function handleHelp(ctx) {
+  const isOwner = String(ctx.chat.id) === String(MANAGER_CHAT_ID);
+
+  if (isOwner) {
+    await ctx.reply([
+      `📖 Команды менеджера`,
+      ``,
+      `━━━ Заявки от клиентов ━━━`,
+      `/new — показать новые заявки`,
+      `/active — заявки в работе`,
+      `/today — все заявки за сегодня`,
+      ``,
+      `━━━ Мониторинг FA-FA.KZ ━━━`,
+      `/monitor — запустить / остановить мониторинг`,
+      `   Бот проверяет сайт каждые 3 минуты`,
+      `   и присылает новые грузы сюда`,
+      ``,
+      `/filter — настроить фильтры поиска`,
+      `   Можно задать:`,
+      `   🗺 Откуда — город отправления`,
+      `   🗺 Куда — город назначения`,
+      `   📦 Груз — тип груза (например: зерно, авто)`,
+      `   Без фильтров — приходят все новые заявки`,
+      `   Напишите - (минус) чтобы убрать фильтр`,
+      ``,
+      `━━━ Кнопки у заявки ━━━`,
+      `✅ Принять — взять заявку в работу`,
+      `❌ Отклонить — отклонить заявку`,
+      `⏱ 5 / 15 / 30 мин — напомнить позже`,
+      `💬 WhatsApp — написать клиенту напрямую`,
+    ].join("\n"));
+  } else {
+    await ctx.reply([
+      `Здравствуйте! Я логистический менеджер по грузоперевозкам.`,
+      ``,
+      `Просто расскажите о вашем грузе — откуда, куда и что везём.`,
+      `Я соберу заявку и передам её менеджеру.`,
+      ``,
+      `Вы также можете отправить голосовое сообщение 🎙`,
+    ].join("\n"));
   }
 }
 
