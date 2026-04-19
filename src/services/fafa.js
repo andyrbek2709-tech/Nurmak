@@ -3,7 +3,8 @@ import { loadBotSetting, saveBotSetting } from "./supabase.js";
 
 const FAFA_URL = "https://fa-fa.kz";
 const SEARCH_URL = `${FAFA_URL}/search_load/`;
-const CHECK_INTERVAL_MS = 3 * 60 * 1000;
+const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const NO_RESULTS_NOTIFY_MS = 60 * 60 * 1000;
 
 let _bot = null;
 
@@ -17,7 +18,7 @@ function emptyFilters() {
 async function getOrInitUser(chatId) {
   const key = String(chatId);
   if (!users.has(key)) {
-    const state = { filters: emptyFilters(), seenKeys: new Set(), isRunning: false, monitorTimer: null };
+    const state = { filters: emptyFilters(), seenKeys: new Set(), isRunning: false, monitorTimer: null, lastNoResultsAt: 0 };
     users.set(key, state);
     try {
       const val = await loadBotSetting(`filters_${key}`);
@@ -64,6 +65,7 @@ export async function startMonitoring(chatId) {
   if (u.isRunning) return;
   u.isRunning = true;
   u.seenKeys.clear();
+  u.lastNoResultsAt = Date.now(); // первый hourly-сигнал придёт через час
   console.log(`[FAFA] monitoring started for ${chatId}`);
   await tick(chatId);
 }
@@ -142,9 +144,11 @@ async function tick(chatId) {
 
     if (matched.length > 0) {
       for (const item of matched) await notify(item, chatId, true);
+      u.lastNoResultsAt = Date.now(); // сбрасываем счётчик — были новые результаты
       console.log(`[FAFA] sent ${matched.length} notifications to ${chatId}`);
-    } else {
-      await _bot.telegram.sendMessage(chatId, "🔍 Пока нет ничего нового").catch(e =>
+    } else if (Date.now() - u.lastNoResultsAt >= NO_RESULTS_NOTIFY_MS) {
+      u.lastNoResultsAt = Date.now();
+      await _bot.telegram.sendMessage(chatId, "🔍 Новых результатов нет").catch(e =>
         console.error("[FAFA] sendMessage error:", e.message)
       );
     }

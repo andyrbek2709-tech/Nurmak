@@ -90,7 +90,8 @@ async function handleCallback(ctx) {
       if (field === "clear") {
         await clearFilters(chatId);
         await ctx.answerCbQuery("Фильтры сброшены");
-        await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard() });
+        const isActive = await isMonitoringActive(chatId);
+        await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) });
       } else if (field === "search") {
         await ctx.answerCbQuery("Ищу...");
         await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
@@ -106,8 +107,23 @@ async function handleCallback(ctx) {
         }).catch(async (err) => {
           await ctx.telegram.sendMessage(chatId, `❌ Ошибка поиска: ${err.message}`).catch(() => {});
         });
+      } else if (field === "monitor") {
+        const isActive = await isMonitoringActive(chatId);
+        if (isActive) {
+          await stopMonitoring(chatId);
+          await ctx.answerCbQuery("Мониторинг остановлен");
+        } else {
+          await ctx.answerCbQuery("Мониторинг запущен!");
+          await ctx.reply("▶️ Мониторинг запущен. Проверка каждые 5 минут.\nНовые грузы — сразу. Если ничего нового — раз в час.");
+          startMonitoring(chatId).catch(err => {
+            console.error("[FAFA] startMonitoring error:", err.message);
+            ctx.telegram.sendMessage(chatId, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
+          });
+        }
+        const nowActive = await isMonitoringActive(chatId);
+        await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(nowActive) }).catch(() => {});
       } else {
-        const labels = { from: "Откуда (город)", to: "Куда (город)", cargo: "Тип груза", truck_type: "Тип машины (Тент, Рефрижератор, Бортовой...)" };
+        const labels = { from: "Откуда (город или страна)", to: "Куда (город или страна)" };
         filterAwait.set(String(chatId), field);
         await ctx.answerCbQuery();
         await ctx.reply(`Напишите значение для «${labels[field] || field}» (или «-» чтобы убрать фильтр):`);
@@ -183,17 +199,18 @@ const filterAwait = new Map(); // chatId → "from" | "to" | "cargo"
 
 async function buildFilterText(chatId) {
   const f = await getFilters(chatId);
+  const isActive = await isMonitoringActive(chatId);
   return [
     `⚙️ Фильтры поиска FA-FA:`,
     ``,
     `🗺 Откуда: ${f.from || "любой"}`,
     `🗺 Куда: ${f.to || "любой"}`,
-    `📦 Груз: ${f.cargo || "любой"}`,
-    `🚛 Тип машины: ${f.truck_type || "любой"}`,
+    ``,
+    isActive ? `🟢 Мониторинг активен` : `⚫️ Мониторинг выключен`,
   ].join("\n");
 }
 
-function buildFilterKeyboard() {
+function buildFilterKeyboard(isActive = false) {
   return {
     inline_keyboard: [
       [
@@ -201,12 +218,11 @@ function buildFilterKeyboard() {
         { text: "✏️ Куда", callback_data: "fset:to" },
       ],
       [
-        { text: "✏️ Груз", callback_data: "fset:cargo" },
-        { text: "🚛 Тип машины", callback_data: "fset:truck_type" },
-      ],
-      [
         { text: "🔍 Найти сейчас", callback_data: "fset:search" },
         { text: "🗑 Сбросить всё", callback_data: "fset:clear" },
+      ],
+      [
+        { text: isActive ? "⏹ Остановить мониторинг" : "▶️ Мониторинг каждые 5 мин", callback_data: "fset:monitor" },
       ],
     ],
   };
@@ -214,7 +230,8 @@ function buildFilterKeyboard() {
 
 async function handleFilter(ctx) {
   const chatId = String(ctx.chat.id);
-  await ctx.reply(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard() });
+  const isActive = await isMonitoringActive(chatId);
+  await ctx.reply(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) });
 }
 
 async function handleMonitor(ctx) {
@@ -222,9 +239,9 @@ async function handleMonitor(ctx) {
   try {
     if (await isMonitoringActive(chatId)) {
       await stopMonitoring(chatId);
-      await ctx.reply("⏹ Мониторинг fa-fa.kz остановлен.");
+      await ctx.reply("⏹ Мониторинг остановлен.");
     } else {
-      await ctx.reply("▶️ Мониторинг fa-fa.kz запущен. Проверка каждые 3 минуты.");
+      await ctx.reply("▶️ Мониторинг запущен. Проверка каждые 5 минут.\nНовые грузы — сразу. Если ничего нового — раз в час.");
       startMonitoring(chatId).catch(err => {
         console.error("[FAFA] startMonitoring error:", err.message);
         ctx.telegram.sendMessage(chatId, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
@@ -292,10 +309,11 @@ export async function handleText(ctx) {
     filterAwait.delete(chatId);
     const value = userMessage.trim() === "-" ? null : userMessage.trim();
     await setFilter(chatId, awaitField, value);
-    const labels = { from: "Откуда", to: "Куда", cargo: "Груз", truck_type: "Тип машины" };
+    const labels = { from: "Откуда", to: "Куда" };
+    const isActive = await isMonitoringActive(chatId);
     await ctx.reply(
       `${value ? `✅ Фильтр «${labels[awaitField]}» установлен: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${await buildFilterText(chatId)}`,
-      { reply_markup: buildFilterKeyboard() }
+      { reply_markup: buildFilterKeyboard(isActive) }
     );
     return;
   }
