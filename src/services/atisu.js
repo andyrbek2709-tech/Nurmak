@@ -261,66 +261,73 @@ async function extractItems(page) {
     { timeout: 8000 }
   ).catch(() => {});
 
-  const { items, debugBlocks } = await page.evaluate(() => {
+  const { items, debug } = await page.evaluate(() => {
     const DIRECTION = /^[A-Z]{2,3}-[A-Z]{2,3}$/;
     const TRUCK_KW  = /тент|реф|изот|борт|конт|цист|любая|открыт|термос/i;
-    const WEIGHT_RE = /^\d[\d,]*\s*\/\s*\d/;
-    // Date keywords — NOT anchored so they match anywhere in line
+    const WEIGHT_RE = /\d[\d,]*\s*\/\s*\d/;
     const DATE_KW   = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
     const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
-    const SKIP      = /^#[A-Z0-9]+$|^Упорядочить|^Направл|^Транспорт|^Вес|^Маршрут|^Ставка|^Вид|^Выводить/i;
+    const CITY_RE   = /^[А-ЯЁ][а-яё]/;
 
-    const bodyText = document.body.innerText || "";
-    const startIdx = bodyText.indexOf("Найдено ");
-    if (startIdx < 0) return { items: [], debugBlocks: [] };
-
-    const lines = bodyText.substring(startIdx).split("\n")
-      .map(s => s.trim()).filter(Boolean);
-
-    const blocks = [];
-    let cur = null;
-    for (const line of lines) {
-      if (DIRECTION.test(line)) {
-        if (cur) blocks.push(cur);
-        cur = [line];
-      } else if (cur) {
-        if (!SKIP.test(line)) cur.push(line);
+    // Walk UP from el, return first ancestor whose innerText has "км" and length in [minLen, maxLen]
+    const findRowContainer = (el, minLen = 80, maxLen = 2000) => {
+      let cur = el.parentElement;
+      for (let d = 0; d < 15; d++) {
+        if (!cur) break;
+        const len = (cur.innerText || "").length;
+        if (len >= minLen && len <= maxLen && (cur.innerText || "").includes("км")) return cur;
+        cur = cur.parentElement;
       }
-    }
-    if (cur) blocks.push(cur);
+      return null;
+    };
+
+    // Find all leaf text nodes that match direction code pattern
+    const dirEls = Array.from(document.querySelectorAll("*")).filter(el =>
+      el.children.length === 0 && DIRECTION.test((el.textContent || "").trim())
+    );
 
     const results = [];
-    for (const block of blocks) {
-      const distance  = (block.find(l => /^\d[\d\s]*\s*км/.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
-      const truck_type = block.find(l => TRUCK_KW.test(l)) || "";
+    const seenContainers = new Set();
 
-      const wLine  = block.find(l => WEIGHT_RE.test(l)) || "";
-      const weight = wLine.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
-      const cargo  = wLine.replace(/^[\d,. /\s]+/, "").trim() || "";
+    for (const dirEl of dirEls) {
+      const row = findRowContainer(dirEl);
+      if (!row) continue;
 
-      const dateIdx = block.findIndex(l => DATE_KW.test(l));
+      const rowKey = (row.innerText || "").substring(0, 50);
+      if (seenContainers.has(rowKey)) continue;
+      seenContainers.add(rowKey);
+
+      // Get leaf texts from the row in DOM order
+      const leafs = Array.from(row.querySelectorAll("*"))
+        .filter(el => el.children.length === 0 && (el.innerText || "").trim())
+        .map(el => (el.innerText || "").trim())
+        .filter(Boolean);
+
+      const distance  = (leafs.find(l => /\d[\d\s]*\s*км/.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
+      const truck_type = leafs.find(l => TRUCK_KW.test(l)) || "";
+      const wLeaf     = leafs.find(l => WEIGHT_RE.test(l)) || "";
+      const weight    = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
+      const cargo     = wLeaf.replace(/^[\d,. /\s]+/, "").trim() || "";
+
+      const dateIdx = leafs.findIndex(l => DATE_KW.test(l));
       let from = "", time = "";
-
       if (dateIdx >= 0) {
-        const dateLine = block[dateIdx];
-        // Handle merged format "Актауготов 19 апр." — city name glued to date keyword
-        // Lazy match: uppercase Cyrillic start, then letters until date keyword
+        const dateLine = leafs[dateIdx];
+        // Handle merged "Актауготов 19 апр." — city glued to date keyword
         const merged = dateLine.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
         if (merged && merged[1].trim().length >= 2) {
           from = merged[1].trim();
           time = dateLine.substring(merged[1].length).trim();
         } else {
-          from = dateIdx > 0 ? block[dateIdx - 1] : "";
+          from = dateIdx > 0 ? leafs[dateIdx - 1] : "";
           time = dateLine;
         }
       }
+      const to    = dateIdx >= 0 && dateIdx + 1 < leafs.length ? leafs[dateIdx + 1] : "";
+      const price = leafs.find(l => PRICE_KW.test(l)) || "";
 
-      const to = dateIdx >= 0 && dateIdx + 1 < block.length ? block[dateIdx + 1] : "";
-      const price = block.find(l => PRICE_KW.test(l)) || "";
-
-      // Validate: from/to must look like city names (start with uppercase Cyrillic)
-      const isCity = s => /^[А-ЯЁ]/.test(s) && s.length < 60;
-      if (from && to && from !== to && isCity(from) && isCity(to)) {
+      if (from && to && from !== to && CITY_RE.test(from) && CITY_RE.test(to)
+          && from.length < 60 && to.length < 60) {
         results.push({ from, to, distance, cargo, weight, truck_type, price, time });
       }
     }
@@ -333,9 +340,19 @@ async function extractItems(page) {
       return true;
     });
 
-    return { items: deduped, debugBlocks: blocks.slice(0, 3).map(b => b.slice(0, 12)) };
+    // Debug: show first row container content
+    const debugRow = dirEls[0] ? (() => {
+      const r = findRowContainer(dirEls[0]);
+      return r ? (r.innerText || "").slice(0, 300) : "no container";
+    })() : "no dirEls";
+
+    return { items: deduped, debug: { dirEls: dirEls.length, results: results.length, rowSample: debugRow } };
   });
 
-  console.log(`[ATISU] parsed ${items.length} items, blocks[0..2]:`, JSON.stringify(debugBlocks));
+  console.log(`[ATISU] dirEls=${debug.dirEls} parsed=${debug.results} deduped=${items.length}`);
+  console.log(`[ATISU] row[0]:`, debug.rowSample);
+  items.slice(0, 3).forEach((it, i) =>
+    console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
+  );
   return items;
 }
