@@ -178,168 +178,61 @@ async function fillSearchForm(page) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
 
-  // DIAGNOSTIC: dump all form inputs to understand page structure
-  const formInputs = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("input, select")).map(el => ({
-      tag: el.tagName, name: el.name, type: el.type,
-      id: el.id, placeholder: el.placeholder, value: el.value,
-    }))
-  );
-  console.log("[FAFA] form inputs:", JSON.stringify(formInputs));
-
-  const fillWithAutocomplete = async (label, value) => {
-    // Find the actual input next to the label td
-    const inputInfo = await page.evaluate((lbl) => {
-      const tds = Array.from(document.querySelectorAll("td"));
-      const labelTd = tds.find(td => td.textContent.trim().startsWith(lbl));
-      if (!labelTd) return null;
-      const sibling = labelTd.nextElementSibling;
-      const inp = sibling?.querySelector("input") || sibling?.querySelector("select");
-      if (!inp) return null;
-      return { name: inp.name, id: inp.id, type: inp.type };
-    }, label);
-    console.log(`[FAFA] input for "${label}":`, JSON.stringify(inputInfo));
-
-    // Build selector for the target input
-    let inputSel = null;
-    if (inputInfo?.name) inputSel = `input[name="${inputInfo.name}"]`;
-    else if (inputInfo?.id) inputSel = `#${inputInfo.id}`;
-
-    if (inputSel) {
-      try {
-        await page.click(inputSel, { timeout: 3000 });
-        await page.fill(inputSel, "");
-        await page.type(inputSel, value, { delay: 80 });
-        console.log(`[FAFA] typed "${value}" into ${inputSel}`);
-      } catch (e) {
-        console.log(`[FAFA] type failed for ${inputSel}: ${e.message}`);
-        inputSel = null;
-      }
-    }
-
-    if (!inputSel) {
-      // Fallback: fill first empty visible text input
-      await page.evaluate((v) => {
-        const inp = Array.from(document.querySelectorAll("input[type='text']"))
-          .find(el => !el.value && el.offsetParent);
-        if (inp) {
-          inp.focus(); inp.value = v;
-          ["input", "keyup", "change"].forEach(ev =>
-            inp.dispatchEvent(new Event(ev, { bubbles: true }))
-          );
-        }
-      }, value);
-      console.log(`[FAFA] fallback fill "${value}"`);
-    }
-
-    await rand(2000, 2500); // wait for autocomplete dropdown
-
-    // DIAGNOSTIC: what visible elements contain our text after typing?
-    const domInfo = await page.evaluate((v) => {
-      const found = [];
-      for (const el of document.querySelectorAll("*")) {
-        if (!el.offsetParent) continue;
-        if (el.children.length > 0) continue;
-        const txt = (el.textContent || "").trim();
-        if (txt && txt.toLowerCase().includes(v.toLowerCase()) && txt.length < 120) {
-          found.push({ tag: el.tagName, cls: (el.className || "").substring(0, 50),
-            name: el.getAttribute("name"), id: el.id,
-            val: el.value, text: txt.substring(0, 80) });
-        }
-      }
-      return found.slice(0, 10);
-    }, value);
-    console.log(`[FAFA] DOM after typing "${value}":`, JSON.stringify(domInfo));
-
-    // Click first visible suggestion — fa-fa.kz uses div.av1
-    const suggClicked = await page.evaluate((v) => {
-      const selectors = [
-        "div.av1",
-        "ul.ui-autocomplete li",
-        ".autocomplete-suggestion",
-        ".suggestions li", ".suggestions div",
-        "[class*='autocomplete'] li", "[class*='autocomplete'] div",
-        "[class*='suggest'] li", "[class*='suggest'] div",
-        "div.dropdown-menu li",
-        "input[name='load_search']",
-      ];
-      for (const sel of selectors) {
-        const items = Array.from(document.querySelectorAll(sel))
-          .filter(el => el.offsetParent);
-        if (items.length > 0) {
-          items[0].click();
-          return `${sel} -> "${(items[0].textContent || items[0].value || "").trim().substring(0, 60)}"`;
-        }
-      }
-      return null;
+  // Type into input by id, remove any overlay, wait for div.av1 and click first suggestion
+  const typeAndPickSuggestion = async (inputId, value) => {
+    // Remove CSR overlay that blocks clicks
+    await page.evaluate(() => {
+      document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
     });
-    console.log(`[FAFA] suggestion click: ${suggClicked}`);
-    await rand(800, 1200);
+
+    // Trigger autocomplete via JS events
+    await page.evaluate((id, v) => {
+      const inp = document.getElementById(id);
+      if (!inp) return;
+      inp.focus();
+      inp.value = v;
+      inp.dispatchEvent(new InputEvent("input", { bubbles: true, data: v }));
+      inp.dispatchEvent(new Event("keyup", { bubbles: true }));
+    }, inputId, value);
+
+    await rand(2000, 2500);
+
+    const picked = await page.evaluate(() => {
+      const divs = Array.from(document.querySelectorAll("div.av1")).filter(d => d.offsetParent);
+      if (!divs.length) return null;
+      divs[0].click();
+      return divs[0].textContent.trim();
+    });
+    console.log(`[FAFA] #${inputId} suggestion: "${picked}"`);
+    await rand(800, 1000);
+    return picked;
   };
 
-  if (filters.from) await fillWithAutocomplete("Место погрузки", filters.from);
-  if (filters.to) await fillWithAutocomplete("Место разгрузки", filters.to);
+  // City[1] = #search1 (from), city_end = #search10 (to)
+  if (filters.from) await typeAndPickSuggestion("search1", filters.from);
+  if (filters.to) await typeAndPickSuggestion("search10", filters.to);
 
-  // city_end is often hidden — set via JS directly as well
-  if (filters.to) {
-    await page.evaluate((v) => {
-      const inp = document.querySelector("input[name='city_end']");
-      if (inp) {
-        inp.value = v;
-        ["input", "change"].forEach(ev => inp.dispatchEvent(new Event(ev, { bubbles: true })));
-      }
-    }, filters.to);
-    console.log(`[FAFA] city_end set via JS: "${filters.to}"`);
-  }
-
-  // Select truck type via select element
+  // Truck type select
   if (filters.truck_type) {
-    await page.evaluate((truckType) => {
+    await page.evaluate((t) => {
       const sel = document.querySelector("select[name='car_type'], select");
       if (!sel) return;
-      const opt = Array.from(sel.options).find(o =>
-        o.text.toLowerCase().includes(truckType.toLowerCase())
-      );
+      const opt = Array.from(sel.options).find(o => o.text.toLowerCase().includes(t.toLowerCase()));
       if (opt) sel.value = opt.value;
     }, filters.truck_type).catch(() => {});
   }
 
-  // DIAGNOSTIC: what does the form look like before submit?
-  const beforeSubmit = await page.evaluate(() =>
-    Array.from(document.querySelectorAll("input[type='text'], input[type='hidden'], select"))
-      .filter(el => el.name)
-      .map(el => ({ name: el.name, value: el.value }))
-  );
-  console.log("[FAFA] form state before submit:", JSON.stringify(beforeSubmit));
-
-  // Submit search
-  const clicked = await page.evaluate(() => {
+  // Submit
+  await page.evaluate(() => {
     const btn = document.querySelector("input[name='car_search']");
-    if (btn) { btn.click(); return `car_search clicked, value="${btn.value}"`; }
-    const btn2 = document.querySelector("input[type='submit'], button[type='submit']");
-    if (btn2) { btn2.click(); return `submit btn clicked: "${btn2.value || btn2.textContent}"`; }
-    return null;
+    if (btn) btn.click();
   });
-  console.log(`[FAFA] search submit: ${clicked}`);
+  console.log("[FAFA] search submitted");
 
   await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  try {
-    await page.waitForSelector("tr td a", { timeout: 10000 });
-  } catch (_) {
-    console.log("[FAFA] waitForSelector tr td a timed out — proceeding anyway");
-  }
+  try { await page.waitForSelector("tr td a", { timeout: 10000 }); } catch (_) {}
   await rand(800, 1200);
-
-  // DIAGNOSTIC: what rows/links exist after submit?
-  const afterSubmit = await page.evaluate(() => {
-    const links = Array.from(document.querySelectorAll("a")).filter(a => a.textContent.includes("—"));
-    const rows = document.querySelectorAll("tr");
-    const html = document.body.innerHTML.substring(0, 1500);
-    return { rowCount: rows.length, dashLinks: links.slice(0, 5).map(a => a.textContent.trim()), html };
-  });
-  console.log(`[FAFA] after submit: rows=${afterSubmit.rowCount}, dashLinks=${JSON.stringify(afterSubmit.dashLinks)}`);
-  console.log("[FAFA] page HTML snippet:", afterSubmit.html);
   console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
 
@@ -390,94 +283,69 @@ async function doLogin(page) {
 }
 
 async function extractItems(page) {
-  // Dump first result rows to understand HTML structure
-  const diagnostic = await page.evaluate(() => {
-    const rows = Array.from(document.querySelectorAll("tr"));
-    const sample = rows.slice(0, 8).map(r => r.outerHTML.substring(0, 500));
-    const links = Array.from(document.querySelectorAll("a"))
-      .filter(a => a.textContent.trim().length > 2)
-      .slice(0, 20)
-      .map(a => a.textContent.trim().substring(0, 80));
-    return { rowCount: rows.length, sample, links };
-  });
-  console.log("[FAFA] row sample:", JSON.stringify(diagnostic.sample).substring(0, 3000));
-  console.log("[FAFA] all links:", JSON.stringify(diagnostic.links));
-
   return page.evaluate(() => {
-    const results = [];
-    const SEPS = ["—", "→", " - ", " – "];
+    const SEPS = ["→", "—", "–"];
+    const JUNK = /выход|кабинет|справка|telegram|copyright|реклам|отмеченн|главная|мои\s*груз|мои\s*машин|найти\s*груз|найти\s*машин/i;
 
-    function hasSep(txt) { return SEPS.some(s => txt.includes(s)); }
-    function splitBySep(txt) {
+    function splitRoute(txt) {
       for (const sep of SEPS) {
         const idx = txt.indexOf(sep);
-        if (idx >= 0) return [txt.substring(0, idx).trim(), txt.substring(idx + sep.length).trim(), sep];
-      }
-      return [txt, "", ""];
-    }
-
-    const rows = Array.from(document.querySelectorAll("tr")).filter(r => {
-      const links = r.querySelectorAll("a");
-      if (!links.length) return false;
-      // Accept if any link text has a separator OR if row has 2+ city links
-      for (const a of links) {
-        if (hasSep(a.textContent)) return true;
-      }
-      // Also accept rows with 2+ non-empty links (separate from/to cells)
-      const nonEmpty = Array.from(links).filter(a => a.textContent.trim().length > 2);
-      return nonEmpty.length >= 2;
-    });
-
-    for (const row of rows.slice(0, 80)) {
-      const cells = Array.from(row.querySelectorAll("td"));
-      if (cells.length < 2) continue;
-
-      let from = "", to = "", truck_type = "", weight = "", cargo = "", time = "";
-
-      // Try: single link with separator "from — to"
-      const routeCell = cells.find(td => {
-        const a = td.querySelector("a");
-        return a && hasSep(a.textContent);
-      });
-
-      if (routeCell) {
-        const routeText = routeCell.querySelector("a").textContent.trim();
-        const [f, t] = splitBySep(routeText);
-        from = f;
-        to = t.replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
-        const lines = routeCell.textContent.trim().split("\n").map(s => s.trim()).filter(Boolean);
-        truck_type = lines[1] || "";
-      } else {
-        // Try: from and to are in separate links / tds
-        const cityLinks = Array.from(row.querySelectorAll("a"))
-          .filter(a => a.textContent.trim().length > 2);
-        if (cityLinks.length >= 2) {
-          from = cityLinks[0].textContent.trim();
-          to = cityLinks[1].textContent.trim().replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
-        } else if (cityLinks.length === 1) {
-          from = cityLinks[0].textContent.trim();
+        if (idx >= 0) {
+          const from = txt.substring(0, idx).trim();
+          const to = txt.substring(idx + sep.length).trim().replace(/\s*-\s*\d+\s*км.*$/i, "").trim();
+          return { from, to };
         }
       }
+      return null;
+    }
 
-      time = cells[0]?.textContent?.trim().split("\n")[0] || "";
+    const results = [];
 
+    // Find all <a> tags whose text contains a route separator
+    const routeLinks = Array.from(document.querySelectorAll("a")).filter(a => {
+      const txt = a.textContent;
+      return SEPS.some(s => txt.includes(s));
+    });
+
+    for (const link of routeLinks) {
+      const route = splitRoute(link.textContent.trim());
+      if (!route || !route.from || !route.to) continue;
+      if (JUNK.test(route.from) || JUNK.test(route.to)) continue;
+      if (route.from.length > 80 || route.to.length > 80) continue;
+
+      // Walk up to the containing <tr>
+      let row = link.parentElement;
+      while (row && row.tagName !== "TR") row = row.parentElement;
+      if (!row) continue;
+
+      const cells = Array.from(row.querySelectorAll("td"));
+      const time = cells[0]?.textContent?.trim().split("\n")[0] || "";
+
+      // Truck type: look for type keywords in the link's parent cell text
+      let trCell = link.parentElement;
+      while (trCell && trCell.tagName !== "TD") trCell = trCell.parentElement;
+      const cellLines = (trCell?.textContent || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
+      const truck_type = cellLines.find(l => /тент|рефр|изот|борт|конт|цист|любая|открыт/i.test(l)) || cellLines[1] || "";
+
+      // Weight and cargo
+      let weight = "", cargo = "";
       for (const td of cells) {
         const txt = td.textContent || "";
-        if (/\d+\s*т/.test(txt) || /\d+\s*м[³3]/.test(txt)) {
-          const lines = txt.trim().split("\n").map(s => s.trim()).filter(Boolean);
+        if (/\d+\s*т[^а-яa-z]/.test(txt) || /\d+\s*м[³3]/.test(txt)) {
+          const lines = txt.trim().split("\n").map(s => s.trim()).filter(s => s && s.length < 60);
           weight = lines[0] || "";
-          cargo = lines[1] || "";
+          cargo = lines.find(l => l !== weight && !/^\d/.test(l) && !JUNK.test(l)) || "";
           break;
         }
       }
 
-      if (from && from.length > 1) results.push({ from, to, cargo, weight, truck_type, time });
+      results.push({ from: route.from, to: route.to, cargo, weight, truck_type, time });
     }
 
-    // Deduplicate
+    // Deduplicate by from+to+time
     const seen = new Set();
     return results.filter(it => {
-      const k = `${it.from}|${it.to}`.toLowerCase();
+      const k = `${it.from}|${it.to}|${it.time}`.toLowerCase().replace(/\s/g, "");
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
