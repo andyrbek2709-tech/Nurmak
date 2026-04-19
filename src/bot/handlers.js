@@ -6,7 +6,7 @@ import {
   getLeadsByStatus, getLeadsToday, normalizePhone,
 } from "../services/supabase.js";
 import { getUser, upsertUser } from "../services/users.js";
-import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters } from "../services/fafa.js";
+import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters, runOnce, buildMessage } from "../services/fafa.js";
 
 const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
 
@@ -27,6 +27,7 @@ export function registerHandlers(bot) {
   bot.command("today", handleOwnerToday);
   bot.command("monitor", handleMonitor);
   bot.command("filter", handleFilter);
+  bot.command("search", handleSearchOnce);
   bot.command("help", handleHelp);
 
   bot.on("text", handleText);
@@ -140,16 +141,31 @@ async function handleCallback(ctx) {
     const msgId = ctx.callbackQuery.message.message_id;
 
     if (action === "fset") {
-      const field = id; // "from", "to", "cargo", "clear"
+      const field = id;
       if (field === "clear") {
         clearFilters();
         await ctx.answerCbQuery("Фильтры сброшены");
         await ctx.editMessageText(buildFilterText(), { reply_markup: buildFilterKeyboard() });
+      } else if (field === "search") {
+        await ctx.answerCbQuery("Ищу...");
+        await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
+        runOnce().then(async (items) => {
+          if (!items.length) {
+            await ctx.telegram.sendMessage(MANAGER_CHAT_ID, "По вашим фильтрам ничего не найдено.");
+            return;
+          }
+          for (const item of items) {
+            await ctx.telegram.sendMessage(MANAGER_CHAT_ID, buildMessage(item)).catch(() => {});
+          }
+          await ctx.telegram.sendMessage(MANAGER_CHAT_ID, `✅ Найдено ${items.length} заявок.`);
+        }).catch(async (err) => {
+          await ctx.telegram.sendMessage(MANAGER_CHAT_ID, `❌ Ошибка поиска: ${err.message}`).catch(() => {});
+        });
       } else {
-        const labels = { from: "Откуда (город)", to: "Куда (город)", cargo: "Тип груза" };
+        const labels = { from: "Откуда (город)", to: "Куда (город)", cargo: "Тип груза", truck_type: "Тип машины (Тент, Рефрижератор, Бортовой...)" };
         filterAwait.set(String(chatId), field);
         await ctx.answerCbQuery();
-        await ctx.reply(`Напишите значение для «${labels[field]}» (или «-» чтобы убрать фильтр):`);
+        await ctx.reply(`Напишите значение для «${labels[field] || field}» (или «-» чтобы убрать фильтр):`);
       }
       return;
     }
@@ -223,11 +239,12 @@ const filterAwait = new Map(); // chatId → "from" | "to" | "cargo"
 function buildFilterText() {
   const f = getFilters();
   return [
-    `⚙️ Текущие фильтры мониторинга FA-FA:`,
+    `⚙️ Фильтры поиска FA-FA:`,
     ``,
     `🗺 Откуда: ${f.from || "любой"}`,
     `🗺 Куда: ${f.to || "любой"}`,
     `📦 Груз: ${f.cargo || "любой"}`,
+    `🚛 Тип машины: ${f.truck_type || "любой"}`,
   ].join("\n");
 }
 
@@ -237,9 +254,15 @@ function buildFilterKeyboard() {
       [
         { text: "✏️ Откуда", callback_data: "fset:from" },
         { text: "✏️ Куда", callback_data: "fset:to" },
-        { text: "✏️ Груз", callback_data: "fset:cargo" },
       ],
-      [{ text: "🗑 Сбросить всё", callback_data: "fset:clear" }],
+      [
+        { text: "✏️ Груз", callback_data: "fset:cargo" },
+        { text: "🚛 Тип машины", callback_data: "fset:truck_type" },
+      ],
+      [
+        { text: "🔍 Найти сейчас", callback_data: "fset:search" },
+        { text: "🗑 Сбросить всё", callback_data: "fset:clear" },
+      ],
     ],
   };
 }
@@ -276,6 +299,21 @@ async function handleMonitor(ctx) {
   }
 }
 
+async function handleSearchOnce(ctx) {
+  if (String(ctx.chat.id) !== String(MANAGER_CHAT_ID)) { await ctx.reply("Нет доступа."); return; }
+  await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
+  try {
+    const items = await runOnce();
+    if (!items.length) { await ctx.reply("По вашим фильтрам ничего не найдено."); return; }
+    for (const item of items) {
+      await ctx.reply(buildMessage(item));
+    }
+    await ctx.reply(`✅ Найдено ${items.length} заявок.`);
+  } catch (err) {
+    await ctx.reply(`❌ Ошибка: ${err.message}`);
+  }
+}
+
 async function handleHelp(ctx) {
   const isOwner = String(ctx.chat.id) === String(MANAGER_CHAT_ID);
 
@@ -293,13 +331,13 @@ async function handleHelp(ctx) {
       `   Бот проверяет сайт каждые 3 минуты`,
       `   и присылает новые грузы сюда`,
       ``,
-      `/filter — настроить фильтры поиска`,
-      `   Можно задать:`,
-      `   🗺 Откуда — город отправления`,
-      `   🗺 Куда — город назначения`,
-      `   📦 Груз — тип груза (например: зерно, авто)`,
-      `   Без фильтров — приходят все новые заявки`,
+      `/filter — настроить фильтры и запустить поиск`,
+      `   🗺 Откуда / Куда — город`,
+      `   📦 Груз — тип груза`,
+      `   🚛 Тип машины — Тент, Рефрижератор, Бортовой...`,
+      `   🔍 Найти сейчас — разовый поиск`,
       `   Напишите - (минус) чтобы убрать фильтр`,
+      `/search — разовый поиск по текущим фильтрам`,
       ``,
       `━━━ Кнопки у заявки ━━━`,
       `✅ Принять — взять заявку в работу`,
