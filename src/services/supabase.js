@@ -30,6 +30,7 @@ function buildRow(leadData) {
     urgency: leadData.urgency || null,
     notes: leadData.notes || null,
     status: "new",
+    client_chat_id: leadData.client_chat_id || null,
   };
 }
 

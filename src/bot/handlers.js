@@ -135,15 +135,23 @@ async function handleCallback(ctx) {
     const msgId = ctx.callbackQuery.message.message_id;
 
     if (action === "accept") {
+      const lead = await getLeadById(id);
       await updateLeadStatus(id, "in_progress");
       cancelReminder(id);
       await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
       await ctx.telegram.sendMessage(chatId, `✅ Заявка ${id.substring(0, 8)} принята в работу.`);
+      if (lead.client_chat_id) {
+        await ctx.telegram.sendMessage(lead.client_chat_id, "✅ Ваша заявка принята в работу! Менеджер скоро свяжется с вами.").catch(() => {});
+      }
     } else if (action === "reject") {
+      const lead = await getLeadById(id);
       await updateLeadStatus(id, "canceled");
       cancelReminder(id);
       await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
       await ctx.telegram.sendMessage(chatId, `❌ Заявка ${id.substring(0, 8)} отклонена.`);
+      if (lead.client_chat_id) {
+        await ctx.telegram.sendMessage(lead.client_chat_id, "К сожалению, по вашей заявке не смогли подобрать транспорт. Попробуйте изменить условия или свяжитесь с нами напрямую.").catch(() => {});
+      }
     } else if (action === "delay5" || action === "delay15" || action === "delay30") {
       const minutes = action === "delay5" ? 5 : action === "delay15" ? 15 : 30;
       await ctx.telegram.editMessageReplyMarkup(chatId, msgId, undefined, { inline_keyboard: [] });
@@ -249,7 +257,7 @@ async function processMessage(ctx, chatId, userText) {
     const result = await chat(messages);
 
     if (result.type === "function") {
-      const saved = await saveLead(result.args);
+      const saved = await saveLead({ ...result.args, client_chat_id: ctx.chat.id });
 
       await ctx.telegram.sendMessage(
         MANAGER_CHAT_ID,
