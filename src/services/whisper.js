@@ -21,7 +21,7 @@ export async function transcribeVoice(ctx) {
 
   const transcription = await openai.audio.transcriptions.create({
     model: "whisper-1",
-    file: new File([buffer], "voice.ogg", { type: "audio/ogg" }),
+    file: await openai.toFile(buffer, "voice.ogg", { type: "audio/ogg" }),
     language: "ru",
   });
 
