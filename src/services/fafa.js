@@ -136,13 +136,16 @@ async function scrape() {
     const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
     if (!hasAuth) await doLogin(page);
 
-    // Try to find "НАЙТИ ГРУЗ" link in navigation and follow it
+    // Try to find "НАЙТИ ГРУЗ" public board link (exclude personal "МОИ ГРУЗЫ" / my_loads)
     const cargoLink = await page.evaluate(() => {
       const links = Array.from(document.querySelectorAll("a"));
-      const match = links.find(a =>
-        /найти\s*груз|поиск\s*груз|cargo|cargoes|грузы/i.test(a.textContent) ||
-        /\/cargoes|\/cargo|\/gruz|\/search/i.test(a.href)
-      );
+      const match = links.find(a => {
+        const href = a.href || "";
+        const text = a.textContent?.trim() || "";
+        if (/my_loads|my_cargo|мои\s*груз/i.test(href + text)) return false; // skip personal
+        return /найти\s*груз|поиск\s*груз/i.test(text) ||
+               /\/cargoes\/|\/cargo\/|\/gruz\/|\/search\//i.test(href);
+      });
       return match ? { href: match.href, text: match.textContent.trim() } : null;
     });
 
