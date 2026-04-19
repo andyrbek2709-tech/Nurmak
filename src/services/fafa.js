@@ -246,9 +246,25 @@ async function fillSearchForm(page) {
     return picked;
   };
 
+  const isCountry = (val) => val && !!COUNTRY_ALIASES[val.toLowerCase()];
+
   // City[1] = #search1 (from), city_end = #search10 (to)
-  if (filters.from) await typeAndPickSuggestion("search1", filters.from);
-  if (filters.to) await typeAndPickSuggestion("search10", filters.to);
+  // Countries (Россия, Казахстан, …) have no city autocomplete on fa-fa.kz —
+  // skip the server field and let client-side COUNTRY_ALIASES filtering handle them.
+  if (filters.from) {
+    if (isCountry(filters.from)) {
+      console.log(`[FAFA] #search1: "${filters.from}" is a country — client-side filter only`);
+    } else {
+      await typeAndPickSuggestion("search1", filters.from);
+    }
+  }
+  if (filters.to) {
+    if (isCountry(filters.to)) {
+      console.log(`[FAFA] #search10: "${filters.to}" is a country — client-side filter only`);
+    } else {
+      await typeAndPickSuggestion("search10", filters.to);
+    }
+  }
 
   // Truck type select
   if (filters.truck_type) {
