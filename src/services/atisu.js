@@ -267,12 +267,17 @@ async function submitForm(page) {
   await page.keyboard.press("Enter");
 }
 
+// ATI.SU only supports city-level search — skip pure country names
+const COUNTRY_NAMES = new Set(Object.values({ RUS:"Россия",KAZ:"Казахстан",BLR:"Беларусь",UKR:"Украина",UZB:"Узбекистан",KGZ:"Кыргызстан",TJK:"Таджикистан",ARM:"Армения",AZE:"Азербайджан",GEO:"Грузия",MDA:"Молдова" }));
+
 async function fillSearchForm(page, filters) {
   const fromVal = firstCity(filters.from);
-  const toVal   = firstCity(filters.to);
+  const toRaw   = firstCity(filters.to);
+  // Don't pass country-only values to ATI.SU city fields (e.g. "Россия", "Казахстан")
+  const toVal   = toRaw && !COUNTRY_NAMES.has(toRaw) ? toRaw : null;
   if (!fromVal && !toVal) return;
 
-  console.log(`[ATISU] fillSearchForm: from="${fromVal}" to="${toVal}"`);
+  console.log(`[ATISU] fillSearchForm: from="${fromVal}" to="${toVal || "(страна — пропуск)"}"`);
 
   const fillCity = async (label, selectors, value) => {
     if (!value) return;
@@ -321,12 +326,12 @@ async function fillSearchForm(page, filters) {
 
     if (!best) { console.log(`[ATISU] ${label}: no matching option`); return; }
 
-    const clicked = await page.evaluate((txt, sel) => {
+    const clicked = await page.evaluate(({ txt, sel }) => {
       const items = Array.from(document.querySelectorAll(sel));
       const el = items.find(e => e.offsetParent !== null && e.textContent?.trim() === txt);
       if (el) { el.click(); return true; }
       return false;
-    }, best, optSel);
+    }, { txt: best, sel: optSel });
 
     console.log(`[ATISU] ${label}: ${clicked ? `selected "${best}"` : "click failed"}`);
     await rand(500, 800);
