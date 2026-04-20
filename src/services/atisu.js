@@ -101,13 +101,13 @@ export async function scrapeAtisu(filters) {
 }
 
 function extractFromApiResponses(apiResponses) {
-  // ATI.SU cargo API returns objects with load details
-  // Try several known patterns for the response shape
   for (const { url, json } of apiResponses) {
-    // Pattern 1: { items: [...] } where items have cargo fields
+    // Prioritise the known ATI.SU endpoint
+    const isLoadsEndpoint = url.includes("/loads/search") || url.includes("loads.ati.su");
+
     const candidates = Array.isArray(json) ? json
+      : Array.isArray(json?.loads) ? json.loads       // ATI.SU: { loads: [...] }
       : Array.isArray(json?.items) ? json.items
-      : Array.isArray(json?.loads) ? json.loads
       : Array.isArray(json?.data) ? json.data
       : Array.isArray(json?.result) ? json.result
       : null;
@@ -117,19 +117,21 @@ function extractFromApiResponses(apiResponses) {
     const first = candidates[0];
     if (!first || typeof first !== "object") continue;
 
-    // Check if this looks like a cargo/load record
-    const hasLoad = "from" in first || "to" in first || "weight" in first
-      || "fromCity" in first || "toCity" in first || "cargo" in first
-      || "origin" in first || "destination" in first
-      || "departureCity" in first || "arrivalCity" in first
-      || "loadingCity" in first || "unloadingCity" in first
-      || "cityFrom" in first || "cityTo" in first
-      || "route" in first || "distance" in first;
+    const keys = Object.keys(first);
+    console.log(`[ATISU] candidate array len=${candidates.length} url=${url.substring(0, 80)}`);
+    console.log(`[ATISU] first record keys: ${keys.join(",").substring(0, 200)}`);
 
-    if (!hasLoad) continue;
+    // ATI.SU public API uses Loading/Unloading (PascalCase)
+    const hasLoad = isLoadsEndpoint
+      || keys.some(k => /^(Loading|Unloading|loading|unloading|from|to|weight|cargo|route|origin|destination|fromCity|toCity|cityFrom|cityTo|departureCity|arrivalCity|loadingCity|unloadingCity|Cargo|Transport|Payment)$/i.test(k));
 
-    console.log(`[ATISU] found cargo data at: ${url.substring(0, 80)}`);
-    console.log(`[ATISU] record keys: ${Object.keys(first).join(",").substring(0, 120)}`);
+    if (!hasLoad) {
+      console.log(`[ATISU] skipping — no cargo fields recognised`);
+      continue;
+    }
+
+    // Log a sample record for field-name discovery
+    try { console.log(`[ATISU] first record sample: ${JSON.stringify(first).substring(0, 400)}`); } catch (_) {}
 
     return candidates.map(it => parseApiItem(it)).filter(Boolean);
   }
@@ -137,22 +139,52 @@ function extractFromApiResponses(apiResponses) {
 }
 
 function parseApiItem(it) {
-  // Try multiple known field name patterns from ATI.SU API
-  const from = it.fromCity?.name || it.from?.city?.name || it.from?.name
+  // ATI.SU public API v1.0: Loading / Unloading objects with nested city info
+  const loadingCity = it.Loading?.City?.Name || it.Loading?.CityName || it.Loading?.city?.name
+    || it.Loading?.city || it.loading?.city?.name || it.loading?.cityName || "";
+  const unloadingCity = it.Unloading?.City?.Name || it.Unloading?.CityName || it.Unloading?.city?.name
+    || it.Unloading?.city || it.unloading?.city?.name || it.unloading?.cityName || "";
+
+  // Fallback to other common naming patterns
+  const from = loadingCity
+    || it.fromCity?.name || it.from?.city?.name || it.from?.name
     || it.origin?.city || it.loadingCity || it.cityFrom?.name || it.cityFrom
     || it.departureCity || "";
-  const to = it.toCity?.name || it.to?.city?.name || it.to?.name
+  const to = unloadingCity
+    || it.toCity?.name || it.to?.city?.name || it.to?.name
     || it.destination?.city || it.unloadingCity || it.cityTo?.name || it.cityTo
     || it.arrivalCity || "";
-  const cargo = it.cargo?.name || it.cargo || it.cargoName || it.freightName || "";
-  const weight = it.weight || it.tonnage || "";
-  const price = it.price || it.rate || it.cost || "";
-  const truck_type = it.truckType?.name || it.truckType || it.bodyType?.name || it.bodyType || "";
-  const distance = it.distance || "";
-  const time = it.loadingDate || it.departureDate || it.readyAt || "";
+
+  // Cargo: ATI.SU uses Cargo object; fallback to flat fields
+  const cargo = it.Cargo?.Name || it.Cargo?.type || it.cargo?.name || it.cargo
+    || it.cargoName || it.freightName || "";
+  const weight = it.Cargo?.Weight ?? it.Cargo?.weight ?? it.weight ?? it.tonnage ?? "";
+
+  // Price: ATI.SU uses Payment object
+  const rateSum = it.Payment?.RateSum ?? it.Payment?.rateSum ?? it.Payment?.FixedRate;
+  const currency = it.Payment?.CurrencyId === 1 ? "₽" : it.Payment?.CurrencyId === 2 ? "€" : "";
+  const price = rateSum != null
+    ? `${rateSum}${currency}`
+    : (it.price || it.rate || it.cost || "");
+
+  // Truck: ATI.SU uses Transport object
+  const truck_type = it.Transport?.CarType || it.Transport?.carType
+    || it.truckType?.name || it.truckType || it.bodyType?.name || it.bodyType || "";
+
+  const distance = it.Distance ?? it.distance ?? "";
+
+  // Dates: ATI.SU uses FirstDate / LastDate
+  const time = it.FirstDate || it.LastDate || it.firstDate || it.lastDate
+    || it.loadingDate || it.departureDate || it.readyAt || "";
 
   if (!from && !to) return null;
-  return { from: String(from), to: String(to), cargo: String(cargo), weight: String(weight), price: String(price), truck_type: String(truck_type), distance: String(distance), time: String(time), source: "atisu" };
+  return {
+    from: String(from), to: String(to),
+    cargo: String(cargo), weight: String(weight),
+    price: String(price), truck_type: String(truck_type),
+    distance: String(distance), time: String(time),
+    source: "atisu",
+  };
 }
 
 async function doLogin(page) {
