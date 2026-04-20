@@ -453,12 +453,18 @@ async function extractItemsDom(page) {
         cards: cards.length,
         card0: cards[0]?.slice(0, 15),
         preWeights: preWeights.slice(0, 5),
+        afterSample: afterLeafs.slice(0, 30),
+        foundText: (foundEl?.textContent || "").trim().substring(0, 60),
       },
     };
   });
 
   console.log(`[ATISU] DOM card-parse: ${result.items?.length} items, cards=${result.debug?.cards}`);
-  console.log(`[ATISU] card[0]:`, JSON.stringify(result.debug?.card0));
+  console.log(`[ATISU] foundEl: "${result.debug?.foundText}"`);
+  console.log(`[ATISU] afterLeafs[0..30]:`, JSON.stringify(result.debug?.afterSample));
+  if (result.debug?.cards > 0) {
+    console.log(`[ATISU] card[0]:`, JSON.stringify(result.debug?.card0));
+  }
   if (result.items?.length === 0) {
     console.log(`[ATISU] preWeights:`, JSON.stringify(result.debug?.preWeights));
   }

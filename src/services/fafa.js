@@ -203,19 +203,26 @@ export function buildMessage(item, opts = {}) {
 // ─── Scraper ──────────────────────────────────────────────────────────────────
 
 async function scrape(filters) {
-  const [fafaResult, atisuResult] = await Promise.allSettled([
-    scrapeFafa(filters),
-    scrapeAtisu(filters),
-  ]);
   const items = [];
-  if (fafaResult.status === "fulfilled")
-    items.push(...fafaResult.value.map(i => ({ ...i, source: "fafa" })));
-  else
-    console.error("[SCRAPE] fafa error:", fafaResult.reason?.message);
-  if (atisuResult.status === "fulfilled")
-    items.push(...atisuResult.value.map(i => ({ ...i, source: "atisu" })));
-  else
-    console.error("[SCRAPE] atisu error:", atisuResult.reason?.message);
+
+  // Run sequentially to avoid launching two Chromium instances simultaneously (OOM risk)
+  try {
+    const fafaItems = await scrapeFafa(filters);
+    items.push(...fafaItems.map(i => ({ ...i, source: "fafa" })));
+  } catch (err) {
+    console.error("[SCRAPE] fafa error:", err.message);
+  }
+
+  try {
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("scrapeAtisu timeout 120s")), 120000)
+    );
+    const atisuItems = await Promise.race([scrapeAtisu(filters), timeout]);
+    items.push(...atisuItems.map(i => ({ ...i, source: "atisu" })));
+  } catch (err) {
+    console.error("[SCRAPE] atisu error:", err.message);
+  }
+
   return items;
 }
 
