@@ -86,56 +86,71 @@ export async function scrapeAtisu(filters) {
 
 const ATI_COUNTRY = { RUS: "Россия", KAZ: "Казахстан", BLR: "Беларусь", UKR: "Украина", UZB: "Узбекистан", KGZ: "Кыргызстан", TJK: "Таджикистан" };
 
+// ATI.SU truck carType bit values → Russian names
+const ATI_CAR_TYPE = { "1":"тент","2":"реф","4":"изотерм","8":"борт","16":"фург","32":"цистерна","64":"любой","128":"контейнер","256":"термос","512":"самосвал" };
+
+function atiCity(obj) {
+  if (!obj) return "";
+  // Try every known nesting pattern for city name in loading/unloading objects
+  return obj.cityName || obj.cityFullName || obj.city?.name || obj.city?.fullName
+    || obj.place?.name || obj.place?.cityName || obj.geo?.cityName || obj.address?.city
+    || obj.name || "";
+}
+
 function parseApiItem(it) {
-  // Try all known camelCase / PascalCase variants for loading/unloading city
-  const loadingCity =
-    it.loading?.city?.name || it.loading?.cityName || it.loading?.place?.name
-    || it.loading?.placeName || it.loading?.geo?.city || it.loading?.address?.city
-    || it.Loading?.City?.Name || it.Loading?.CityName || it.Loading?.city?.name || "";
+  // Confirmed top-level keys: route, truck, load, loading, unloading, rate
+  const loadingCity   = atiCity(it.loading);
+  const unloadingCity = atiCity(it.unloading);
 
-  const unloadingCity =
-    it.unloading?.city?.name || it.unloading?.cityName || it.unloading?.place?.name
-    || it.unloading?.placeName || it.unloading?.geo?.city || it.unloading?.address?.city
-    || it.Unloading?.City?.Name || it.Unloading?.CityName || it.Unloading?.city?.name || "";
+  // route.country = "KAZ-RUS" → fallback country names for filter matching
+  const routeParts  = (it.route?.country || "").split("-");
+  const fromCountry = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[0]] || "") : "";
+  const toCountry   = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[routeParts.length - 1]] || "") : "";
 
-  // route.country = "KAZ-RUS" → split into from/to country codes
-  const routeParts = (it.route?.country || "").split("-");
-  const fromCountry = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[0]] || routeParts[0]) : "";
-  const toCountry   = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[routeParts.length - 1]] || routeParts[routeParts.length - 1]) : "";
-
-  // City + country suffix ensures matchesFilters("Россия") works for Russian cities
+  // Always append country so matchesFilters("Россия") can match "Москва, Россия"
   const from = loadingCity
     ? (fromCountry ? `${loadingCity}, ${fromCountry}` : loadingCity)
-    : (fromCountry
-        || it.fromCity?.name || it.from?.city?.name || it.from?.name || it.loadingCity || "");
-
+    : fromCountry;
   const to = unloadingCity
     ? (toCountry ? `${unloadingCity}, ${toCountry}` : unloadingCity)
-    : (toCountry
-        || it.toCity?.name || it.to?.city?.name || it.to?.name || it.unloadingCity || "");
+    : toCountry;
 
-  // Cargo — API uses lowercase `cargo` object
-  const cargo = it.cargo?.name || it.cargo?.type || it.Cargo?.Name
-    || it.cargoName || it.freightName || "";
-  const weight = it.cargo?.weight ?? it.cargo?.Weight ?? it.Cargo?.Weight ?? it.weight ?? "";
+  // Cargo — confirmed field name: `load` (not `cargo`)
+  const loadObj = it.load || {};
+  const cargo  = loadObj.name || loadObj.cargoName || loadObj.typeName || loadObj.type || "";
+  const weightVal = loadObj.weight ?? loadObj.tonnage ?? loadObj.weightMax ?? "";
+  const volVal    = loadObj.volume ?? loadObj.volumeMax ?? "";
+  const weight = weightVal !== "" && volVal !== "" ? `${weightVal}т / ${volVal}м³`
+    : weightVal !== "" ? `${weightVal}т`
+    : volVal !== "" ? `${volVal}м³` : "";
 
-  // Price — API uses lowercase `price` object
-  const rateSum = it.price?.sum ?? it.price?.rate ?? it.price?.rateSum
-    ?? it.Payment?.RateSum ?? it.payment?.rateSum ?? null;
-  const currCode = it.price?.currency || it.payment?.currency || "";
-  const currency = currCode === "RUB" || currCode === "1" ? "₽" : currCode === "EUR" ? "€" : "";
-  const price = rateSum != null ? `${rateSum}${currency}` : (it.rate || it.cost || "");
+  // Truck — `truck.carTypes` is array of numeric IDs: ["1","8","16","64"]
+  const truck_type = Array.isArray(it.truck?.carTypes)
+    ? it.truck.carTypes.map(t => ATI_CAR_TYPE[String(t)] || t).join(", ")
+    : (it.truck?.carTypeName || it.truck?.carType || "");
 
-  // Truck type — API uses lowercase `truck` object
-  const carTypes = Array.isArray(it.truck?.carTypes) ? it.truck.carTypes.join(",") : "";
-  const truck_type = carTypes || it.truck?.carType
-    || it.truckType?.name || it.truckType || it.bodyType?.name || it.bodyType || "";
+  // Rate — confirmed field name: `rate` (was "[object Object]" → it's an object)
+  const rateObj   = it.rate || {};
+  const rateSum   = rateObj.sum ?? rateObj.rateSum ?? rateObj.value ?? rateObj.amount;
+  const rateCurr  = rateObj.currency === "RUB" ? "₽" : rateObj.currency === "EUR" ? "€" : (rateObj.currency || "");
+  const rateType  = rateObj.type || rateObj.rateType || "";
+  const price = rateSum != null && rateSum > 0
+    ? `${rateSum} ${rateCurr}`.trim()
+    : rateType === "request" || rateType === "negotiated" ? "запрос ставки"
+    : rateType === "hidden"  ? "скрыто"
+    : "";
 
-  const distance = it.route?.distance ?? it.Distance ?? it.distance ?? "";
+  const distance = it.route?.distance ?? "";
 
-  // Dates — API uses addDate/changeDate; loading may have its own date
-  const time = it.loading?.date || it.loading?.dateFrom
-    || it.addDate || it.firstDate || it.loadingDate || "";
+  // Loading date — from `loading` object, fallback to addDate date part
+  const time = it.loading?.date || it.loading?.dateFrom || it.loading?.firstDate
+    || it.loading?.dateStart || (it.addDate ? it.addDate.substring(0, 10) : "");
+
+  // Log loading/unloading structure if cities still empty (for future debugging)
+  if (!loadingCity && !unloadingCity) {
+    try { console.log(`[ATISU] loading obj: ${JSON.stringify(it.loading).substring(0, 300)}`); } catch (_) {}
+    try { console.log(`[ATISU] unloading obj: ${JSON.stringify(it.unloading).substring(0, 300)}`); } catch (_) {}
+  }
 
   if (!from && !to) return null;
   return {
