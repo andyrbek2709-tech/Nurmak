@@ -23,31 +23,6 @@ export async function scrapeAtisu(filters) {
     });
     const page = await context.newPage();
 
-    // Track all non-asset requests to discover ATI.SU API endpoints
-    const requestUrls = [];
-    page.on("request", (req) => {
-      if (requestUrls.length >= 100) return;
-      const url = req.url();
-      if (url.includes("ati.su") && !/\.(js|css|png|jpg|ico|woff2?|svg|ttf|eot)(\?|$)/i.test(url)) {
-        requestUrls.push(`${req.method()} ${url.substring(0, 150)}`);
-      }
-    });
-
-    // Intercept ALL JSON responses from ati.su to find the cargo search API
-    const apiResponses = [];
-    page.on("response", async (response) => {
-      try {
-        const url = response.url();
-        if (!url.includes("ati.su")) return;
-        if (response.status() < 200 || response.status() >= 300) return;
-        const ct = response.headers()["content-type"] || "";
-        if (!ct.includes("json")) return;
-        const json = await response.json().catch(() => null);
-        if (!json) return;
-        apiResponses.push({ url, json });
-      } catch (_) {}
-    });
-
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     await rand(1500, 2000);
 
@@ -60,83 +35,50 @@ export async function scrapeAtisu(filters) {
     await page.goto(SEARCH_URL, { waitUntil: "networkidle", timeout: 30000 });
     await rand(1000, 1500);
 
-    // Clear responses captured during page load — only want search results
-    apiResponses.length = 0;
+    // Set up waitForResponse BEFORE clicking search — this avoids the race condition
+    // where response.json() resolves after we've already checked apiResponses
+    const loadsPromise = page.waitForResponse(
+      resp => resp.url().includes("/loads/search") && resp.status() === 200,
+      { timeout: 25000 }
+    ).catch(() => null);
 
     await fillSearchForm(page, filters);
-    await rand(1000, 1500);
+
+    const loadsResp = await loadsPromise;
+    let loadsJson = null;
+    if (loadsResp) {
+      loadsJson = await loadsResp.json().catch(() => null);
+      console.log(`[ATISU] loads/search captured: totalItems=${loadsJson?.totalItems}, loads=${loadsJson?.loads?.length}`);
+    } else {
+      console.log(`[ATISU] loads/search not captured (timeout or no request)`);
+    }
 
     console.log(`[ATISU] scraping URL: ${page.url()}`);
-    console.log(`[ATISU] API requests (last 20): ${requestUrls.slice(-20).join(" | ")}`);
-    console.log(`[ATISU] API responses captured: ${apiResponses.length}`);
 
-    // Log all captured API endpoints to discover cargo data source
-    for (const r of apiResponses) {
-      const keys = Object.keys(r.json || {}).slice(0, 8).join(",");
-      const isArr = Array.isArray(r.json);
-      const len = isArr ? r.json.length : (Array.isArray(r.json?.items) ? r.json.items.length : "");
-      console.log(`[ATISU] api: ${r.url.replace("https://", "").substring(0, 90)} | ${isArr ? `array[${len}]` : `{${keys}}`}${len !== "" ? ` len=${len}` : ""}`);
-    }
-
-    // Try to extract from API first
-    const fromApi = extractFromApiResponses(apiResponses);
-    if (fromApi.length > 0) {
-      console.log(`[ATISU] extracted ${fromApi.length} items from API`);
-      fromApi.slice(0, 3).forEach((it, i) =>
+    // Extract directly from the captured loads array
+    if (loadsJson?.loads?.length > 0) {
+      // Log first record to verify field names
+      try { console.log(`[ATISU] loads[0]: ${JSON.stringify(loadsJson.loads[0]).substring(0, 500)}`); } catch (_) {}
+      const items = loadsJson.loads.map(parseApiItem).filter(Boolean);
+      console.log(`[ATISU] extracted ${items.length} items from API (${loadsJson.loads.length} raw)`);
+      items.slice(0, 3).forEach((it, i) =>
         console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
       );
-      return fromApi;
+      if (items.length > 0) return items;
     }
 
-    // Fallback: DOM extraction
+    // Fallback: DOM card extraction
     console.log(`[ATISU] API extraction got 0, trying DOM...`);
-    const items = await extractItemsDom(page);
-    items.slice(0, 3).forEach((it, i) =>
+    const domItems = await extractItemsDom(page);
+    domItems.slice(0, 3).forEach((it, i) =>
       console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
     );
-    return items;
+    return domItems;
   } finally {
     await browser.close();
   }
 }
 
-function extractFromApiResponses(apiResponses) {
-  for (const { url, json } of apiResponses) {
-    // Prioritise the known ATI.SU endpoint
-    const isLoadsEndpoint = url.includes("/loads/search") || url.includes("loads.ati.su");
-
-    const candidates = Array.isArray(json) ? json
-      : Array.isArray(json?.loads) ? json.loads       // ATI.SU: { loads: [...] }
-      : Array.isArray(json?.items) ? json.items
-      : Array.isArray(json?.data) ? json.data
-      : Array.isArray(json?.result) ? json.result
-      : null;
-
-    if (!candidates || candidates.length === 0) continue;
-
-    const first = candidates[0];
-    if (!first || typeof first !== "object") continue;
-
-    const keys = Object.keys(first);
-    console.log(`[ATISU] candidate array len=${candidates.length} url=${url.substring(0, 80)}`);
-    console.log(`[ATISU] first record keys: ${keys.join(",").substring(0, 200)}`);
-
-    // ATI.SU public API uses Loading/Unloading (PascalCase)
-    const hasLoad = isLoadsEndpoint
-      || keys.some(k => /^(Loading|Unloading|loading|unloading|from|to|weight|cargo|route|origin|destination|fromCity|toCity|cityFrom|cityTo|departureCity|arrivalCity|loadingCity|unloadingCity|Cargo|Transport|Payment)$/i.test(k));
-
-    if (!hasLoad) {
-      console.log(`[ATISU] skipping — no cargo fields recognised`);
-      continue;
-    }
-
-    // Log a sample record for field-name discovery
-    try { console.log(`[ATISU] first record sample: ${JSON.stringify(first).substring(0, 400)}`); } catch (_) {}
-
-    return candidates.map(it => parseApiItem(it)).filter(Boolean);
-  }
-  return [];
-}
 
 function parseApiItem(it) {
   // ATI.SU public API v1.0: Loading / Unloading objects with nested city info
