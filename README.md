@@ -1,78 +1,102 @@
 # Nurmak Bot — Telegram-бот для сбора заявок на грузоперевозки
 
+## Что делает бот
+
+1. **Собирает заявки** от клиентов через голос и текст (OpenAI Whisper + GPT-4o-mini)
+2. **Ищет грузы** на FA-FA.KZ и ATI.SU по фильтрам пользователя
+3. **Мониторит** новые грузы каждые 5 минут и уведомляет в реальном времени
+4. **Сохраняет лиды** в Supabase и уведомляет менеджера
+
 ## Архитектура
 
 ```
 Telegram → Webhook → Express/Telegraf
-                        ├── Whisper API (голос → текст)
-                        ├── OpenAI GPT-4o-mini (диалог + function calling)
-                        └── Supabase (сохранение leads + уведомление менеджера)
+                        ├── Whisper API        (голос → текст)
+                        ├── OpenAI GPT-4o-mini (диалог + function calling → лиды)
+                        ├── Supabase           (хранение лидов + фильтров)
+                        └── Playwright Scraper
+                               ├── FA-FA.KZ   (авторизация + поиск)
+                               └── ATI.SU     (авторизация + поиск + DOM-парсинг)
 ```
 
 ## Структура проекта
 
 ```
 src/
-├── index.js              # Express сервер + Telegraf webhook
+├── index.js              # Express-сервер + Telegraf webhook
 ├── bot/
-│   ├── handlers.js       # Обработка text/voice сообщений
-│   └── prompts.js        # Системный промпт + function schema
+│   ├── handlers.js       # Обработка text/voice + фильтры + поиск + мониторинг
+│   └── prompts.js        # Системный промпт + function schema для GPT
 ├── services/
+│   ├── fafa.js           # Скрапер FA-FA.KZ + оркестратор поиска (runOnce, tick)
+│   ├── atisu.js          # Скрапер ATI.SU (Playwright, авторизация, DOM-парсинг)
 │   ├── openai.js         # Chat completion с function calling
 │   ├── whisper.js        # Голос → текст через Whisper API
-│   └── supabase.js       # Insert в таблицу leads
+│   ├── supabase.js       # Supabase клиент + CRUD для лидов и настроек
+│   └── users.js          # Управление пользователями в Supabase
 └── utils/
-    └── state.js          # In-memory контекст диалогов (TTL 30 мин)
+    ├── timing.js          # delay() и rand() — общие хелперы задержек
+    └── state.js           # In-memory контекст диалогов (TTL 30 мин)
 ```
+
+## Telegram-команды
+
+| Команда | Описание |
+|---|---|
+| `/filter` | Настройка фильтров (Откуда / Куда / Тип груза / Транспорт) |
+| `/search` | Разовый поиск по текущим фильтрам |
+| `/monitor` | Запустить / остановить мониторинг (проверка каждые 5 мин) |
+| `/new` | Новые заявки — только для менеджера |
+| `/active` | Заявки в работе — только для менеджера |
+| `/today` | Заявки за сегодня — только для менеджера |
+| `/help` | Справка |
+
+## Как работает поиск грузов
+
+1. Пользователь задаёт фильтры через `/filter` (страна → город, двухшаговый выбор)
+2. Нажимает **Найти сейчас** — бот скрапит FA-FA.KZ и ATI.SU последовательно
+3. Результаты фильтруются по заданным параметрам и отправляются в Telegram
+4. При мониторинге — новые грузы приходят сразу; если ничего нового — уведомление раз в час
 
 ## Быстрый старт (локально)
 
-### 1. Установить зависимости
-
 ```bash
 npm install
-```
-
-### 2. Создать .env файл
-
-```bash
 cp .env.example .env
-```
-
-Заполнить все переменные в `.env`.
-
-### 3. Создать таблицу в Supabase
-
-Открыть **Supabase Dashboard → SQL Editor** и выполнить:
-
-```sql
--- Содержимое файла supabase/migrations/001_create_leads.sql
-```
-
-### 4. Запустить бота
-
-```bash
+# заполнить .env
 npm run dev
 ```
 
-Для работы webhook локально нужен HTTPS. Используйте [ngrok](https://ngrok.com/):
+Для локального webhook нужен HTTPS — используй [ngrok](https://ngrok.com/):
 
 ```bash
 ngrok http 3000
+# обновить WEBHOOK_DOMAIN в .env
 ```
 
-Обновите `WEBHOOK_DOMAIN` в `.env` на URL от ngrok.
+## Переменные окружения
+
+| Переменная | Описание |
+|---|---|
+| `BOT_TOKEN` | Telegram Bot Token от @BotFather |
+| `OPENAI_API_KEY` | OpenAI API Key |
+| `SUPABASE_URL` | URL проекта Supabase |
+| `SUPABASE_KEY` | service_role ключ Supabase |
+| `MANAGER_CHAT_ID` | Chat ID менеджера (только он видит /new, /active, /today) |
+| `WEBHOOK_DOMAIN` | `https://<app>.up.railway.app` (без слэша в конце) |
+| `ATISU_LOGIN` | Логин / email аккаунта на ATI.SU |
+| `ATISU_PASSWORD` | Пароль аккаунта на ATI.SU |
 
 ## Деплой на Railway
 
-### Вариант 1: Через GitHub
+1. Запушить в GitHub
+2. **railway.app → New Project → Deploy from GitHub repo**
+3. Добавить все переменные окружения в **Variables**
+4. Railway сам запустит `npm start` и установит Chromium через `postinstall`
 
-1. Запушить код в GitHub репозиторий
-2. Открыть [railway.app](https://railway.app) → **New Project** → **Deploy from GitHub repo**
-3. Выбрать репозиторий
-4. Railway автоматически определит Node.js и запустит `npm start`
+> `postinstall` выполняет `playwright install --with-deps chromium` — первый старт занимает дольше обычного.
 
-### Вариант 2: Через CLI
+### CLI-деплой
 
 ```bash
 npm install -g @railway/cli
@@ -81,50 +105,8 @@ railway init
 railway up
 ```
 
-### Настройка переменных окружения
+## Примечания по скраперам
 
-В **Railway Dashboard → Variables** добавить:
-
-| Переменная | Описание |
-|---|---|
-| `BOT_TOKEN` | Telegram Bot Token от @BotFather |
-| `OPENAI_API_KEY` | OpenAI API Key |
-| `SUPABASE_URL` | URL проекта Supabase |
-| `SUPABASE_KEY` | service_role ключ Supabase |
-| `MANAGER_CHAT_ID` | Chat ID менеджера |
-| `WEBHOOK_DOMAIN` | `https://<app-name>.up.railway.app` |
-
-После деплоя Railway назначит домен. Обновите `WEBHOOK_DOMAIN` на этот домен — бот автоматически установит webhook при следующем рестарте.
-
-## Настройка Telegram Bot
-
-### Создать бота
-
-1. Открыть [@BotFather](https://t.me/BotFather)
-2. Отправить `/newbot`
-3. Указать имя и username
-4. Скопировать **BOT_TOKEN**
-
-### Получить Chat ID менеджера
-
-1. Отправить `/start` боту [@userinfobot](https://t.me/userinfobot)
-2. Скопировать **Id** → это `MANAGER_CHAT_ID`
-
-### Установить webhook вручную (опционально)
-
-Бот устанавливает webhook автоматически при запуске. Если нужно вручную:
-
-```bash
-curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/setWebhook?url=https://<WEBHOOK_DOMAIN>/webhook/<BOT_TOKEN>"
-```
-
-## Как работает
-
-1. **Клиент отправляет текст или голос** → Telegram отправляет webhook на сервер
-2. **Голос** → скачивается .ogg файл → отправляется в Whisper API → получается текст
-3. **Текст** → добавляется в контекст диалога → отправляется в OpenAI с function calling
-4. **OpenAI решает:**
-   - Данных недостаточно → отвечает текстом с уточняющим вопросом
-   - Данных достаточно → вызывает функцию `save_lead` с JSON
-5. **JSON сохраняется** в Supabase таблицу `leads`
-6. **Менеджер получает уведомление** в Telegram с полной информацией
+- Оба скрапера работают **последовательно** (сначала FA-FA.KZ, затем ATI.SU) — снижает пиковое потребление памяти
+- ATI.SU: жёсткий таймаут 120 секунд; при ошибке бот отвечает результатами только с FA-FA.KZ
+- ATI.SU требует авторизацию — задай `ATISU_LOGIN` и `ATISU_PASSWORD` в Railway Variables
