@@ -135,20 +135,21 @@ function parseApiItem(it) {
     ? it.truck.carTypes.map(t => ATI_CAR_TYPE[String(t)] || t).join(", ")
     : (it.truck?.carTypeName || "");
 
-  // Price — rate object has no `sum` field for public (unauthenticated) API calls.
-  // rateType: 0=fixed(hidden), 1=request, 2=hidden. isHidden=true means paywall.
+  // Price — after login rate.sum may be available; rateType 1=request, 2=hidden
   const rateObj = it.rate || {};
   let price = "";
   if (it.isHidden) {
     price = "скрыто (лицензия)";
-  } else if (rateObj.negotiation) {
-    price = "запрос ставки";
-  } else if (rateObj.rateType === 1) {
+  } else if (rateObj.sum > 0) {
+    const currency = rateObj.currency || "₽";
+    price = `${rateObj.sum.toLocaleString("ru-RU")} ${currency}`;
+    if (rateObj.rateUnitType === 1) price += "/т";
+    else if (rateObj.rateUnitType === 2) price += "/км";
+  } else if (rateObj.negotiation || rateObj.rateType === 1) {
     price = "запрос ставки";
   } else if (rateObj.rateType === 2) {
     price = "скрыто";
   }
-  // rateType=0 with actual sum — not returned for anonymous requests; leave empty
 
   const distNum = it.route?.distance ?? "";
   const distance = distNum ? `${distNum} км` : "";
@@ -174,61 +175,64 @@ async function doLogin(page) {
   if (!login || !password) throw new Error("ATISU_LOGIN / ATISU_PASSWORD env vars missing");
 
   console.log(`[ATISU] logging in...`);
-  await page.goto(LOGIN_URL, { waitUntil: "networkidle", timeout: 30000 });
-  await rand(1000, 1500);
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  await rand(1500, 2000);
 
-  await page.evaluate(({ l, p }) => {
-    const fire = (el, val) => {
-      el.focus(); el.value = val;
-      el.dispatchEvent(new Event("input",  { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    };
-    const loginEl = document.querySelector(
-      "input[name='login'], input[name='email'], input[type='email'], input[placeholder*='Email'], input[placeholder*='логин'], input[placeholder*='телефон']"
-    );
-    const passEl = document.querySelector("input[name='password'], input[type='password']");
-    if (loginEl) fire(loginEl, l);
-    if (passEl)  fire(passEl,  p);
-  }, { l: login, p: password });
+  // Step 1: fill login field (email/phone)
+  const loginSel = "input[name='login'], input[name='email'], input[type='email'], input[placeholder*='Email'], input[placeholder*='mail'], input[placeholder*='логин'], input[placeholder*='телефон']";
+  await page.waitForSelector(loginSel, { timeout: 15000 });
+  await page.fill(loginSel, login);
+  await rand(400, 700);
 
-  await rand(500, 800);
-
-  const submitted = await page.evaluate(() => {
-    const btn = document.querySelector("button[type='submit'], input[type='submit'], [data-test='submit-btn']");
-    if (btn) { btn.click(); return btn.textContent?.trim() || "btn.click()"; }
-    const form = document.querySelector("form");
-    if (form) { form.submit(); return "form.submit()"; }
-    return null;
-  });
-  console.log(`[ATISU] login submit: ${submitted}`);
-
-  await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-  await rand(2000, 3000);
+  // Step 2: fill password field
+  const passSel = "input[type='password'], input[name='password']";
+  const passEl = await page.$(passSel);
+  if (passEl) {
+    await page.fill(passSel, password);
+    await rand(400, 700);
+    await submitLoginForm(page);
+    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await rand(1500, 2500);
+    console.log(`[ATISU] after fill+submit URL: ${page.url()}`);
+  } else {
+    // Two-step login: submit email first, then password appears
+    await submitLoginForm(page);
+    await page.waitForSelector(passSel, { timeout: 10000 });
+    await page.fill(passSel, password);
+    await rand(400, 700);
+    await submitLoginForm(page);
+    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await rand(1500, 2500);
+    console.log(`[ATISU] two-step login done URL: ${page.url()}`);
+  }
 
   const afterUrl = page.url();
   console.log(`[ATISU] login done, URL: ${afterUrl}`);
+}
 
-  if (afterUrl.includes("id.ati.su")) {
-    const passVisible = await page.$("input[type='password']");
-    if (passVisible) {
-      await page.evaluate(({ p }) => {
-        const el = document.querySelector("input[type='password']");
-        if (el) {
-          el.focus(); el.value = p;
-          el.dispatchEvent(new Event("input",  { bubbles: true }));
-          el.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      }, { p: password });
-      await rand(400, 600);
-      await page.evaluate(() => {
-        const btn = document.querySelector("button[type='submit'], input[type='submit']");
-        if (btn) btn.click();
-      });
-      await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-      await rand(1500, 2000);
-      console.log(`[ATISU] login step-2 done, URL: ${page.url()}`);
+async function submitLoginForm(page) {
+  // Try buttons by priority: text match, then any visible button
+  const selectors = [
+    "button:has-text('Войти')",
+    "button:has-text('Вход')",
+    "button:has-text('Продолжить')",
+    "button:has-text('Sign in')",
+    "button[type='submit']",
+    "input[type='submit']",
+    "button",
+  ];
+  for (const sel of selectors) {
+    const btn = await page.$(sel);
+    if (btn && await btn.isVisible()) {
+      const txt = await btn.textContent().catch(() => "");
+      console.log(`[ATISU] clicking: ${sel} text="${txt?.trim()}"`);
+      await btn.click();
+      return;
     }
   }
+  // Fallback: press Enter on the active input
+  console.log(`[ATISU] no button found, pressing Enter`);
+  await page.keyboard.press("Enter");
 }
 
 async function fillSearchForm(page, filters) {
