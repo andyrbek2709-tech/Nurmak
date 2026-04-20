@@ -26,6 +26,15 @@ export async function scrapeAtisu(filters) {
     });
     const page = await context.newPage();
 
+    // Track all non-asset requests to discover ATI.SU API endpoints
+    const requestUrls = [];
+    page.on("request", (req) => {
+      const url = req.url();
+      if (url.includes("ati.su") && !/\.(js|css|png|jpg|ico|woff2?|svg|ttf|eot)(\?|$)/i.test(url)) {
+        requestUrls.push(`${req.method()} ${url.substring(0, 150)}`);
+      }
+    });
+
     // Intercept ALL JSON responses from ati.su to find the cargo search API
     const apiResponses = [];
     page.on("response", async (response) => {
@@ -57,9 +66,10 @@ export async function scrapeAtisu(filters) {
     apiResponses.length = 0;
 
     await fillSearchForm(page, filters);
-    await rand(3000, 4000);
+    await rand(1000, 1500);
 
     console.log(`[ATISU] scraping URL: ${page.url()}`);
+    console.log(`[ATISU] API requests (last 20): ${requestUrls.slice(-20).join(" | ")}`);
     console.log(`[ATISU] API responses captured: ${apiResponses.length}`);
 
     // Log all captured API endpoints to discover cargo data source
@@ -347,8 +357,18 @@ async function fillSearchForm(page, filters) {
 async function extractItemsDom(page) {
   await page.waitForFunction(
     () => document.body.innerText.includes("Найдено"),
-    { timeout: 8000 }
+    { timeout: 5000 }
   ).catch(() => {});
+
+  // Probe which CSS selectors exist in the results area
+  const classProbe = await page.evaluate(() => {
+    const probes = ["[class*='card']","[class*='Card']","[class*='row']","[class*='Row']",
+      "[class*='item']","[class*='Item']","[class*='load']","[class*='Load']",
+      "article","[data-testid]","[class*='Cargo']","[class*='Route']"];
+    return probes.map(sel => ({ sel, count: document.querySelectorAll(sel).length }))
+      .filter(x => x.count > 0 && x.count < 500);
+  });
+  console.log(`[ATISU] class probe:`, JSON.stringify(classProbe));
 
   const { items, debug } = await page.evaluate(() => {
     const TRUCK_KW  = /тент|реф|изот|борт|конт|цист|любая|открыт|термос/i;
