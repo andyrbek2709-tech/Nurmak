@@ -268,12 +268,6 @@ async function fillSearchForm(page, filters) {
       document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
     });
 
-    // Log hidden fields BEFORE to understand form structure
-    const hiddenBefore = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, id: el.id, t: el.type, v: el.value }))
-    );
-    console.log(`[FAFA] inputs before #${inputId}:`, JSON.stringify(hiddenBefore));
-
     await page.evaluate(({ id, v }) => {
       const inp = document.getElementById(id);
       if (!inp) return;
@@ -291,7 +285,6 @@ async function fillSearchForm(page, filters) {
       return null;
     }
 
-    // Capture ALL div.av1 elements — text, visibility, data-*, onclick
     const av1List = await page.evaluate(() =>
       Array.from(document.querySelectorAll("div.av1")).slice(0, 5).map(d => ({
         text: d.textContent.trim(),
@@ -300,7 +293,6 @@ async function fillSearchForm(page, filters) {
         html: d.outerHTML.slice(0, 300),
       }))
     );
-    console.log(`[FAFA] div.av1 list:`, JSON.stringify(av1List));
 
     const visibleAv1 = av1List.find(d => d.visible);
     if (!visibleAv1) {
@@ -327,14 +319,11 @@ async function fillSearchForm(page, filters) {
 
     await rand(500, 700);
 
-    // Log hidden fields AFTER click to see what changed
+    // If the city hidden field was NOT set by the click, extract ID from onclick and set manually
+    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
     const hiddenAfter = await page.evaluate(() =>
       Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, id: el.id, t: el.type, v: el.value }))
     );
-    console.log(`[FAFA] inputs after #${inputId}:`, JSON.stringify(hiddenAfter));
-
-    // If the city hidden field was NOT set by the click, extract ID from onclick and set manually
-    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
     const citySet = hiddenAfter.some(f => f.n === fieldName && f.v);
     if (!citySet) {
       // Many autocompletes store the city ID in onclick="setCity(123,'Name')" or data-id="123"
