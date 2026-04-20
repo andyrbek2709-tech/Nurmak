@@ -359,117 +359,108 @@ async function extractItemsDom(page) {
   ).catch(() => {});
 
   const result = await page.evaluate(() => {
-    const DATE_KW   = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
-    const CITY_RE   = /^[А-ЯЁ][а-яё]/;
-    const WEIGHT_RE = /\d[\d,]*\s*\/\s*[\d\-]/;
-    const KM_RE     = /\d[\d\s]*\s*км/;
-    const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
-    const SKIP_TEXTS = new Set([
-      "Направл.", "Транспорт", "Вес,т / объём,м³, груз", "Маршрут", "Ставка",
-      "Упорядочить по", "Вид", "Выводить строк", "ПОКАЗАТЬ КОНТАКТЫ И СТАВКУ",
-      "Добавлены", "когда угодно", "Очистить",
-    ]);
+    const DATE_KW    = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
+    const CARD_START = /^(изм|доб)\s+\d/i;
+    const CITY_RE    = /^[А-ЯЁ][а-яё]/;
+    const KM_RE      = /\d[\d\s]*\s*км/;
+    const PRICE_KW   = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
+    const TRUCK_KW   = /^(тент|реф|изот|борт|конт|цист|любая|открыт|термос)/i;
+    const WEIGHT_RE  = /\d[\d,]*\s*\/\s*[\d\-]/;
+    const NAV_SKIP   = /^(войти|зарегистрироваться|все сервисы|ваши|добавить|заказы|курьер|поиск грузов|тёмная тема|найти груз|фильтры|история поиска|по машинам|цепочки|отслеживаемые|ати|площадки|загр\/выгр|отд\.машина|обновить|показать контакты|доступно|популярные|инструкция|по поиску|расчет|защита|оплата|грузовладельцам|перевозчикам|выводить|упорядочить|времени|вид$|маршрут$|ставка$|транспорт$|направл\.$)/i;
 
     const all = Array.from(document.querySelectorAll("*"));
 
-    // Find a leaf element by exact text
-    const findLeaf = (text) =>
-      all.find(el => el.children.length === 0 && (el.textContent || "").trim() === text);
+    // Find "Найдено N груза" leaf element
+    const foundEl = all.find(el =>
+      el.children.length === 0 && /найдено\s+\d/i.test((el.textContent || "").trim())
+    );
+    if (!foundEl) return { items: [], debug: "no Найдено element" };
 
-    // Get column container by walking up from header until element has 3+ siblings
-    const getColContainer = (headerEl) => {
-      if (!headerEl) return null;
-      let cur = headerEl.parentElement;
-      for (let d = 0; d < 10; d++) {
-        if (!cur) break;
-        const siblings = cur.parentElement?.children?.length || 0;
-        const len = (cur.innerText || "").length;
-        if (siblings >= 3 && len >= 5 && len < 10000) return cur;
-        cur = cur.parentElement;
+    // Collect ALL leaf elements in DOM order, find position of foundEl
+    const allLeafs = all.filter(el =>
+      el.children.length === 0 && (el.innerText || "").trim()
+    );
+    const foundIdx = allLeafs.indexOf(foundEl);
+    if (foundIdx < 0) return { items: [], debug: "Найдено not in leaf list" };
+
+    // Get all leaf texts AFTER "Найдено" — these are the sequential result cards
+    const afterLeafs = allLeafs.slice(foundIdx + 1)
+      .map(el => (el.innerText || "").trim())
+      .filter(t => t && !NAV_SKIP.test(t));
+
+    // Also collect weight data from BEFORE "Найдено" (weight column renders early)
+    const beforeLeafs = allLeafs.slice(0, foundIdx)
+      .map(el => (el.innerText || "").trim())
+      .filter(Boolean);
+    const preWeights = beforeLeafs.filter(t => WEIGHT_RE.test(t));
+
+    // Split afterLeafs into cards at each "изм/доб DATE" boundary
+    const cards = [];
+    let cur = [];
+    for (const t of afterLeafs) {
+      if (CARD_START.test(t) && cur.length > 0) {
+        cards.push(cur);
+        cur = [t];
+      } else {
+        cur.push(t);
       }
-      return null;
-    };
+    }
+    if (cur.length > 0) cards.push(cur);
 
-    // Extract all leaf texts from a column container, skipping header/nav texts
-    const colLeafs = (container, skipText) => {
-      if (!container) return [];
-      return Array.from(container.querySelectorAll("*"))
-        .filter(el => el.children.length === 0 && (el.innerText || "").trim())
-        .map(el => (el.innerText || "").trim())
-        .filter(t => t && t !== skipText && !SKIP_TEXTS.has(t));
-    };
-
-    const routeH  = findLeaf("Маршрут");
-    const weightH = findLeaf("Вес,т / объём,м³, груз");
-    const rateH   = findLeaf("Ставка");
-
-    const routeCol  = getColContainer(routeH);
-    const weightCol = getColContainer(weightH);
-    const rateCol   = getColContainer(rateH);
-
-    const routeLeafs  = colLeafs(routeCol,  "Маршрут");
-    const weightLeafs = colLeafs(weightCol, "Вес,т / объём,м³, груз");
-    const rateLeafs   = colLeafs(rateCol,   "Ставка");
-
-    // Parse route leafs: sequence of [fromCity, date, toCity, (km?)] repeating
     const items = [];
-    let i = 0;
-    while (i < routeLeafs.length && items.length < 50) {
-      const leaf = routeLeafs[i];
-      if (!CITY_RE.test(leaf) && !DATE_KW.test(leaf)) { i++; continue; }
+    for (const card of cards) {
+      const truck_type = card.find(l => TRUCK_KW.test(l)) || "";
+      const price      = card.find(l => PRICE_KW.test(l)) || "";
+      const km         = (card.find(l => KM_RE.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
 
+      const dateIdx = card.findIndex(l => DATE_KW.test(l) && !CARD_START.test(l));
       let from = "", time = "", to = "";
 
-      // Merged: "Актауготов 19 апр."
-      const merged = leaf.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
-      if (merged && merged[1].trim().length >= 2) {
-        from = merged[1].trim();
-        time = leaf.substring(merged[1].length).trim();
-        i++;
-      } else if (CITY_RE.test(leaf)) {
-        from = leaf; i++;
-        // skip non-meaningful items until date
-        while (i < routeLeafs.length && !DATE_KW.test(routeLeafs[i]) && !CITY_RE.test(routeLeafs[i]) && !KM_RE.test(routeLeafs[i])) i++;
-        if (i < routeLeafs.length && DATE_KW.test(routeLeafs[i])) { time = routeLeafs[i]; i++; }
-      } else { i++; continue; }
-
-      // Skip km after date
-      if (i < routeLeafs.length && KM_RE.test(routeLeafs[i])) i++;
-
-      // Skip non-city filler before destination
-      while (i < routeLeafs.length && !CITY_RE.test(routeLeafs[i]) && !KM_RE.test(routeLeafs[i])) i++;
-
-      if (i < routeLeafs.length && CITY_RE.test(routeLeafs[i])) {
-        to = routeLeafs[i]; i++;
-        if (i < routeLeafs.length && KM_RE.test(routeLeafs[i])) i++;
+      if (dateIdx >= 0) {
+        const dateLine = card[dateIdx];
+        const merged = dateLine.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
+        if (merged && merged[1].trim().length >= 2) {
+          from = merged[1].trim();
+          time = dateLine.substring(merged[1].length).trim();
+        } else {
+          // from city = last Cyrillic word before date
+          const before = card.slice(0, dateIdx).filter(l => CITY_RE.test(l) && !TRUCK_KW.test(l));
+          from = before[before.length - 1] || "";
+          time = dateLine;
+        }
+        // to city = first Cyrillic word after date not equal to from
+        for (let j = dateIdx + 1; j < card.length; j++) {
+          const l = card[j];
+          if (CITY_RE.test(l) && !PRICE_KW.test(l) && !TRUCK_KW.test(l) && l !== from) {
+            to = l; break;
+          }
+        }
       }
 
-      if (from && to && from !== to) {
-        const idx = items.length;
-        const wLeaf = weightLeafs[idx] || "";
-        const weight = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
-        const cargo  = wLeaf.replace(/^[\d,. /\-\s]+/, "").trim();
-        const price  = rateLeafs[idx] || "";
-        items.push({ from, to, distance: "", cargo, weight, truck_type: "", price, time, source: "atisu" });
+      const idx = items.length;
+      const wLeaf = preWeights[idx] || "";
+      const weight = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
+      const cargo  = wLeaf.replace(/^[\d,. /\-\s]+/, "").trim();
+
+      if (from && to && from !== to && CITY_RE.test(from)) {
+        items.push({ from, to, distance: km, cargo, weight, truck_type, price, time, source: "atisu" });
       }
     }
 
     return {
       items,
       debug: {
-        routeColCls: routeCol?.className?.substring(0, 60),
-        routeLeafs: routeLeafs.slice(0, 20),
-        weightLeafs: weightLeafs.slice(0, 10),
-        rateLeafs: rateLeafs.slice(0, 10),
+        cards: cards.length,
+        card0: cards[0]?.slice(0, 15),
+        preWeights: preWeights.slice(0, 5),
       },
     };
   });
 
-  console.log(`[ATISU] DOM column-parse: ${result.items?.length} items`);
-  console.log(`[ATISU] routeLeafs:`, JSON.stringify(result.debug?.routeLeafs));
+  console.log(`[ATISU] DOM card-parse: ${result.items?.length} items, cards=${result.debug?.cards}`);
+  console.log(`[ATISU] card[0]:`, JSON.stringify(result.debug?.card0));
   if (result.items?.length === 0) {
-    console.log(`[ATISU] weightLeafs:`, JSON.stringify(result.debug?.weightLeafs));
-    console.log(`[ATISU] routeColCls:`, result.debug?.routeColCls);
+    console.log(`[ATISU] preWeights:`, JSON.stringify(result.debug?.preWeights));
   }
   return result.items || [];
 }
