@@ -6,6 +6,12 @@ const SEARCH_URL = "https://loads.ati.su/";
 function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 function rand(min, max) { return delay(Math.floor(min + Math.random() * (max - min))); }
 
+// Extract first city name from "City, Country" or "City1, City2, Country"
+function firstCity(val) {
+  if (!val) return null;
+  return val.split(",")[0].trim();
+}
+
 export async function scrapeAtisu(filters) {
   const browser = await chromium.launch({
     headless: true,
@@ -20,10 +26,24 @@ export async function scrapeAtisu(filters) {
     });
     const page = await context.newPage();
 
+    // Intercept ALL JSON responses from ati.su to find the cargo search API
+    const apiResponses = [];
+    page.on("response", async (response) => {
+      try {
+        const url = response.url();
+        if (!url.includes("ati.su")) return;
+        if (response.status() < 200 || response.status() >= 300) return;
+        const ct = response.headers()["content-type"] || "";
+        if (!ct.includes("json")) return;
+        const json = await response.json().catch(() => null);
+        if (!json) return;
+        apiResponses.push({ url, json });
+      } catch (_) {}
+    });
+
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     await rand(1500, 2000);
 
-    // Check if already logged in
     const needsLogin = await page.evaluate(() =>
       !!document.querySelector("a[href*='login'], a[href*='signin'], [data-test='login-btn']")
       || !document.cookie.includes("atiauth")
@@ -33,12 +53,36 @@ export async function scrapeAtisu(filters) {
     await page.goto(SEARCH_URL, { waitUntil: "networkidle", timeout: 30000 });
     await rand(1000, 1500);
 
+    // Clear responses captured during page load — only want search results
+    apiResponses.length = 0;
+
     await fillSearchForm(page, filters);
+    await rand(3000, 4000);
 
-    await rand(2000, 3000);
-    console.log(`[ATISU] scraping URL: ${page.url()}, title: ${await page.title()}`);
+    console.log(`[ATISU] scraping URL: ${page.url()}`);
+    console.log(`[ATISU] API responses captured: ${apiResponses.length}`);
 
-    const items = await extractItems(page);
+    // Log all captured API endpoints to discover cargo data source
+    for (const r of apiResponses) {
+      const keys = Object.keys(r.json || {}).slice(0, 8).join(",");
+      const isArr = Array.isArray(r.json);
+      const len = isArr ? r.json.length : (Array.isArray(r.json?.items) ? r.json.items.length : "");
+      console.log(`[ATISU] api: ${r.url.replace("https://", "").substring(0, 90)} | ${isArr ? `array[${len}]` : `{${keys}}`}${len !== "" ? ` len=${len}` : ""}`);
+    }
+
+    // Try to extract from API first
+    const fromApi = extractFromApiResponses(apiResponses);
+    if (fromApi.length > 0) {
+      console.log(`[ATISU] extracted ${fromApi.length} items from API`);
+      fromApi.slice(0, 3).forEach((it, i) =>
+        console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
+      );
+      return fromApi;
+    }
+
+    // Fallback: DOM extraction
+    console.log(`[ATISU] API extraction got 0, trying DOM...`);
+    const items = await extractItemsDom(page);
     items.slice(0, 3).forEach((it, i) =>
       console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
     );
@@ -46,6 +90,61 @@ export async function scrapeAtisu(filters) {
   } finally {
     await browser.close();
   }
+}
+
+function extractFromApiResponses(apiResponses) {
+  // ATI.SU cargo API returns objects with load details
+  // Try several known patterns for the response shape
+  for (const { url, json } of apiResponses) {
+    // Pattern 1: { items: [...] } where items have cargo fields
+    const candidates = Array.isArray(json) ? json
+      : Array.isArray(json?.items) ? json.items
+      : Array.isArray(json?.loads) ? json.loads
+      : Array.isArray(json?.data) ? json.data
+      : Array.isArray(json?.result) ? json.result
+      : null;
+
+    if (!candidates || candidates.length === 0) continue;
+
+    const first = candidates[0];
+    if (!first || typeof first !== "object") continue;
+
+    // Check if this looks like a cargo/load record
+    const hasLoad = "from" in first || "to" in first || "weight" in first
+      || "fromCity" in first || "toCity" in first || "cargo" in first
+      || "origin" in first || "destination" in first
+      || "departureCity" in first || "arrivalCity" in first
+      || "loadingCity" in first || "unloadingCity" in first
+      || "cityFrom" in first || "cityTo" in first
+      || "route" in first || "distance" in first;
+
+    if (!hasLoad) continue;
+
+    console.log(`[ATISU] found cargo data at: ${url.substring(0, 80)}`);
+    console.log(`[ATISU] record keys: ${Object.keys(first).join(",").substring(0, 120)}`);
+
+    return candidates.map(it => parseApiItem(it)).filter(Boolean);
+  }
+  return [];
+}
+
+function parseApiItem(it) {
+  // Try multiple known field name patterns from ATI.SU API
+  const from = it.fromCity?.name || it.from?.city?.name || it.from?.name
+    || it.origin?.city || it.loadingCity || it.cityFrom?.name || it.cityFrom
+    || it.departureCity || "";
+  const to = it.toCity?.name || it.to?.city?.name || it.to?.name
+    || it.destination?.city || it.unloadingCity || it.cityTo?.name || it.cityTo
+    || it.arrivalCity || "";
+  const cargo = it.cargo?.name || it.cargo || it.cargoName || it.freightName || "";
+  const weight = it.weight || it.tonnage || "";
+  const price = it.price || it.rate || it.cost || "";
+  const truck_type = it.truckType?.name || it.truckType || it.bodyType?.name || it.bodyType || "";
+  const distance = it.distance || "";
+  const time = it.loadingDate || it.departureDate || it.readyAt || "";
+
+  if (!from && !to) return null;
+  return { from: String(from), to: String(to), cargo: String(cargo), weight: String(weight), price: String(price), truck_type: String(truck_type), distance: String(distance), time: String(time), source: "atisu" };
 }
 
 async function doLogin(page) {
@@ -88,7 +187,6 @@ async function doLogin(page) {
   const afterUrl = page.url();
   console.log(`[ATISU] login done, URL: ${afterUrl}`);
 
-  // Step-2 form (email first, then password on next screen)
   if (afterUrl.includes("id.ati.su")) {
     const passVisible = await page.$("input[type='password']");
     if (passVisible) {
@@ -114,12 +212,15 @@ async function doLogin(page) {
 
 async function fillSearchForm(page, filters) {
   if (!filters.from && !filters.to) return;
-  console.log(`[ATISU] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
+
+  // Use only the first city for ATI.SU (no multi-city support)
+  const fromVal = firstCity(filters.from);
+  const toVal   = firstCity(filters.to);
+  console.log(`[ATISU] fillSearchForm: from="${fromVal}" to="${toVal}" (raw: from="${filters.from}" to="${filters.to}")`);
 
   const fillReactInput = async (label, selectorList, value) => {
     if (!value) return;
 
-    // Find first matching visible input
     let handle = null;
     let matchedSel = null;
     for (const sel of selectorList) {
@@ -132,7 +233,6 @@ async function fillSearchForm(page, filters) {
     if (!handle) { console.log(`[ATISU] ${label}: no input found`); return; }
     console.log(`[ATISU] ${label}: matched "${matchedSel}"`);
 
-    // Clear via React native setter, then type char-by-char
     await page.evaluate((el) => {
       el.focus();
       const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -144,7 +244,6 @@ async function fillSearchForm(page, filters) {
     await page.keyboard.type(value, { delay: 80 });
     await rand(1200, 1600);
 
-    // Wait for dropdown
     try {
       await page.waitForSelector("[role='option']", { timeout: 5000 });
     } catch (_) {
@@ -152,7 +251,6 @@ async function fillSearchForm(page, filters) {
       return;
     }
 
-    // Get all visible options
     const options = await page.evaluate(() =>
       Array.from(document.querySelectorAll("[role='option']"))
         .filter(el => el.offsetParent !== null)
@@ -161,7 +259,6 @@ async function fillSearchForm(page, filters) {
     );
     console.log(`[ATISU] ${label}: options:`, JSON.stringify(options));
 
-    // Smart best-match: exact → starts-with-comma → first
     const vl = value.toLowerCase();
     const best = options.find(t => t.toLowerCase() === vl)
       || options.find(t => t.toLowerCase().startsWith(vl + ","))
@@ -170,7 +267,6 @@ async function fillSearchForm(page, filters) {
 
     if (!best) { console.log(`[ATISU] ${label}: no option to click`); return; }
 
-    // Click via evaluate — most reliable for React SPAs
     const clicked = await page.evaluate((text) => {
       const items = Array.from(document.querySelectorAll("[role='option']"));
       const item = items.find(el => el.offsetParent !== null && el.textContent?.trim() === text);
@@ -192,17 +288,13 @@ async function fillSearchForm(page, filters) {
     "input[placeholder*='Куда']", "input[placeholder*='куда']",
   ];
 
-  if (filters.from) await fillReactInput("from", fromSelectors, filters.from);
-  if (filters.to)   await fillReactInput("to",   toSelectors,   filters.to);
+  if (fromVal) await fillReactInput("from", fromSelectors, fromVal);
+  if (toVal)   await fillReactInput("to",   toSelectors,   toVal);
 
-  // ATI.SU may auto-search after city selection — wait briefly first
   await rand(2000, 2500);
 
-  // Submit: find the "НАЙТИ ГРУЗЫ" button by innerText
   const submitted = await page.evaluate(() => {
     const SKIP = /выбрать\s*список|очистить|добавить|войти|регистр|фильтр/i;
-
-    // Priority: find by known button texts ("НАЙТИ ГРУЗЫ", "ОБНОВИТЬ" etc.)
     const allBtns = Array.from(document.querySelectorAll("button"));
     const byText = allBtns.find(b => {
       const t = (b.innerText || "").trim();
@@ -210,7 +302,6 @@ async function fillSearchForm(page, filters) {
     });
     if (byText) { byText.click(); return `text: "${(byText.innerText || "").trim()}"`; }
 
-    // Fallback: walk up from search input, skipping known non-submit buttons
     const fromInput = document.querySelector("input[placeholder*='Например, Москва']");
     if (fromInput) {
       let el = fromInput.parentElement;
@@ -234,7 +325,6 @@ async function fillSearchForm(page, filters) {
   if (submitted) {
     console.log(`[ATISU] search submitted via ${submitted}`);
   } else {
-    // Last resort: press Enter on the to-input via keyboard event
     await page.evaluate(() => {
       const toInput = document.querySelector("input[placeholder*='Например, Санкт-Петербург']");
       if (toInput) {
@@ -243,130 +333,119 @@ async function fillSearchForm(page, filters) {
         toInput.dispatchEvent(new KeyboardEvent("keyup",   { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
       }
     });
-    console.log(`[ATISU] search submitted via keyboard Enter on to-input`);
+    console.log(`[ATISU] search submitted via keyboard Enter`);
   }
 
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  await rand(4000, 5000);
+  await rand(3000, 4000);
   console.log(`[ATISU] search done, URL: ${page.url()}`);
 
-  // Dump more body to diagnose result structure
-  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 1500));
   console.log(`[ATISU] body snippet:`, bodySnip);
 }
 
-async function extractItems(page) {
+async function extractItemsDom(page) {
   await page.waitForFunction(
     () => document.body.innerText.includes("Найдено"),
     { timeout: 8000 }
   ).catch(() => {});
 
   const { items, debug } = await page.evaluate(() => {
-    const DIRECTION = /^[A-Z]{2,3}-[A-Z]{2,3}$/;
     const TRUCK_KW  = /тент|реф|изот|борт|конт|цист|любая|открыт|термос/i;
-    const WEIGHT_RE = /\d[\d,]*\s*\/\s*\d/;
+    const WEIGHT_RE = /\d[\d,]*\s*\/\s*[\d\-]/;
     const DATE_KW   = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
     const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
+    const KM_RE     = /\d[\d\s]*\s*км/;
     const CITY_RE   = /^[А-ЯЁ][а-яё]/;
 
-    // Walk UP from el, return first ancestor whose innerText has "км" and length in [minLen, maxLen]
-    const findRowContainer = (el, minLen = 80, maxLen = 2000) => {
-      let cur = el.parentElement;
-      for (let d = 0; d < 15; d++) {
-        if (!cur) break;
-        const len = (cur.innerText || "").length;
-        if (len >= minLen && len <= maxLen && (cur.innerText || "").includes("км")) return cur;
-        cur = cur.parentElement;
-      }
-      return null;
-    };
-
-    // Find all leaf text nodes that match direction code pattern
-    const dirEls = Array.from(document.querySelectorAll("*")).filter(el =>
-      el.children.length === 0 && DIRECTION.test((el.textContent || "").trim())
+    // Find the results section anchor - element containing "Найдено"
+    const foundEl = Array.from(document.querySelectorAll("*")).find(el =>
+      el.children.length === 0 && /найдено\s+\d/i.test((el.textContent || "").trim())
     );
 
+    // Get siblings/following elements after "Найдено" heading
+    // Walk up to find the results container
+    let resultsContainer = null;
+    if (foundEl) {
+      let cur = foundEl.parentElement;
+      for (let d = 0; d < 10; d++) {
+        if (!cur) break;
+        const text = cur.innerText || "";
+        if (text.length > 500) { resultsContainer = cur; break; }
+        cur = cur.parentElement;
+      }
+    }
+
+    if (!resultsContainer) {
+      return { items: [], debug: { msg: "no resultsContainer" } };
+    }
+
+    // Find all row-like children that contain distance (км)
+    const rowEls = Array.from(resultsContainer.querySelectorAll("*")).filter(el => {
+      if (el.children.length === 0) return false;
+      const t = el.innerText || "";
+      return KM_RE.test(t) && DATE_KW.test(t) && t.length > 50 && t.length < 3000;
+    });
+
     const results = [];
-    const seenContainers = new Set();
+    const seen = new Set();
 
-    for (const dirEl of dirEls) {
-      const row = findRowContainer(dirEl);
-      if (!row) continue;
-
-      const rowKey = (row.innerText || "").substring(0, 50);
-      if (seenContainers.has(rowKey)) continue;
-      seenContainers.add(rowKey);
-
-      // Get leaf texts from the row in DOM order
+    for (const row of rowEls) {
       const leafs = Array.from(row.querySelectorAll("*"))
         .filter(el => el.children.length === 0 && (el.innerText || "").trim())
         .map(el => (el.innerText || "").trim())
         .filter(Boolean);
 
-      const distance  = (leafs.find(l => /\d[\d\s]*\s*км/.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
+      if (leafs.length < 3) continue;
+      const key = leafs.slice(0, 5).join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      const distance   = (leafs.find(l => KM_RE.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
       const truck_type = leafs.find(l => TRUCK_KW.test(l)) || "";
-      const wLeaf     = leafs.find(l => WEIGHT_RE.test(l)) || "";
-      const weight    = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
-      const cargo     = wLeaf.replace(/^[\d,. /\s]+/, "").trim() || "";
+      const wLeaf      = leafs.find(l => WEIGHT_RE.test(l)) || "";
+      const weight     = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
+      const cargo      = wLeaf.replace(/^[\d,. /\-\s]+/, "").trim() || "";
+      const price      = leafs.find(l => PRICE_KW.test(l)) || "";
 
       const dateIdx = leafs.findIndex(l => DATE_KW.test(l));
+      if (dateIdx < 0) continue;
+
+      const dateLine = leafs[dateIdx];
       let from = "", time = "";
-      if (dateIdx >= 0) {
-        const dateLine = leafs[dateIdx];
-        // Handle merged "Актауготов 19 апр." — city glued to date keyword
-        const merged = dateLine.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
-        if (merged && merged[1].trim().length >= 2) {
-          from = merged[1].trim();
-          time = dateLine.substring(merged[1].length).trim();
-        } else {
-          from = dateIdx > 0 ? leafs[dateIdx - 1] : "";
-          time = dateLine;
+      const merged = dateLine.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
+      if (merged && merged[1].trim().length >= 2) {
+        from = merged[1].trim();
+        time = dateLine.substring(merged[1].length).trim();
+      } else {
+        from = dateIdx > 0 ? leafs[dateIdx - 1] : "";
+        time = dateLine;
+      }
+
+      // to: first Cyrillic-starting leaf AFTER date that is not a keyword
+      let to = "";
+      for (let i = dateIdx + 1; i < leafs.length; i++) {
+        const l = leafs[i];
+        if (CITY_RE.test(l) && l.length > 1 && l.length < 60 && !PRICE_KW.test(l) && !DATE_KW.test(l) && !TRUCK_KW.test(l)) {
+          to = l; break;
         }
       }
-      const to    = dateIdx >= 0 && dateIdx + 1 < leafs.length ? leafs[dateIdx + 1] : "";
-      const price = leafs.find(l => PRICE_KW.test(l)) || "";
 
-      if (from && to && from !== to && CITY_RE.test(from) && CITY_RE.test(to)
-          && from.length < 60 && to.length < 60) {
+      if (from && to && from !== to && CITY_RE.test(from)) {
         results.push({ from, to, distance, cargo, weight, truck_type, price, time });
       }
     }
 
-    const seen = new Set();
-    const deduped = results.filter(it => {
-      const k = `${it.from}|${it.to}|${it.time}|${it.truck_type}`.toLowerCase().replace(/\s/g, "");
-      if (seen.has(k)) return false;
-      seen.add(k);
-      return true;
-    });
+    const debugRow = rowEls[0] ? (rowEls[0].innerText || "").slice(0, 200) : "no rows";
+    const debugLeafs = rowEls[0] ? Array.from(rowEls[0].querySelectorAll("*"))
+      .filter(el => el.children.length === 0 && (el.innerText || "").trim())
+      .map(el => (el.innerText || "").trim()).filter(Boolean).slice(0, 15) : [];
 
-    // Debug: show first row container content + leaf texts + ancestor chain
-    const debugInfo = (() => {
-      if (!dirEls[0]) return { rowSample: "no dirEls", leafs: [], chain: [] };
-      const el = dirEls[0];
-      // Ancestor text lengths
-      const chain = [];
-      let cur = el.parentElement;
-      for (let d = 0; d < 20 && cur; d++, cur = cur.parentElement) {
-        chain.push({ d, tag: cur.tagName, len: (cur.innerText || "").length, hasKm: (cur.innerText || "").includes("км") });
-      }
-      const r = findRowContainer(el);
-      if (!r) return { rowSample: "no container (maxLen/no-km)", leafs: [], chain };
-      const leafArr = Array.from(r.querySelectorAll("*"))
-        .filter(e => e.children.length === 0 && (e.innerText || "").trim())
-        .map(e => (e.innerText || "").trim()).filter(Boolean);
-      return { rowSample: (r.innerText || "").slice(0, 300), leafs: leafArr.slice(0, 20), chain };
-    })();
-
-    return { items: deduped, debug: { dirEls: dirEls.length, results: results.length, rowSample: debugInfo.rowSample, leafs: debugInfo.leafs, chain: debugInfo.chain } };
+    return { items: results, debug: { rows: rowEls.length, results: results.length, rowSample: debugRow, leafs: debugLeafs } };
   });
 
-  console.log(`[ATISU] dirEls=${debug.dirEls} parsed=${debug.results} deduped=${items.length}`);
-  console.log(`[ATISU] row[0]:`, debug.rowSample);
-  console.log(`[ATISU] leafs[0]:`, JSON.stringify(debug.leafs));
-  console.log(`[ATISU] chain[0]:`, JSON.stringify(debug.chain?.slice(0, 8)));
-  items.slice(0, 3).forEach((it, i) =>
-    console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
-  );
+  console.log(`[ATISU] DOM: rows=${debug.rows} parsed=${debug.results} final=${items.length}`);
+  console.log(`[ATISU] DOM row[0]:`, debug.rowSample);
+  console.log(`[ATISU] DOM leafs[0]:`, JSON.stringify(debug.leafs));
   return items;
 }
