@@ -110,3 +110,84 @@ railway up
 - Оба скрапера работают **последовательно** (сначала FA-FA.KZ, затем ATI.SU) — снижает пиковое потребление памяти
 - ATI.SU: жёсткий таймаут 120 секунд; при ошибке бот отвечает результатами только с FA-FA.KZ
 - ATI.SU требует авторизацию — задай `ATISU_LOGIN` и `ATISU_PASSWORD` в Railway Variables
+
+## Технические решения ATI.SU (scraper)
+
+### 1. Перехват API через `page.route()` вместо `waitForResponse()`
+
+ATI.SU делает XHR-запросы к `/loads/search` — результаты забираются через перехватчик маршрутов:
+
+```javascript
+await page.route(/\/loads\/search(\?|$)/, async (route) => {
+  const resp = await route.fetch();           // выполнить запрос через браузер (с куками)
+  const json = await resp.json().catch(() => null);
+  if (json?.loads) capturedLoads = json;
+  await route.fulfill({ response: resp });    // вернуть ответ странице
+});
+```
+
+**Почему не `waitForResponse()`**: асинхронное чтение `resp.json()` в обработчике `page.on('response')` завершалось ПОСЛЕ того как код-вызыватель уже читал пустой массив — гонка данных. `page.route()` блокирует передачу до завершения обработчика.
+
+### 2. Сохранение сессии через `storageState`
+
+```javascript
+// Загрузка сохранённой сессии (cookies + localStorage)
+if (existsSync(SESSION_PATH)) {
+  contextOpts.storageState = SESSION_PATH;
+}
+// После успешного логина — сохранить
+await context.storageState({ path: SESSION_PATH });
+```
+
+Файл `/tmp/atisu_session.json` создаётся при первом старте контейнера (Railway ephemeral storage). Повторные запросы в рамках одного деплоя используют сохранённую сессию и не логинятся заново.
+
+### 3. Логин в React SPA
+
+ATI.SU не имеет стандартного `button[type="submit"]`. Используется поиск кнопки по тексту:
+
+```javascript
+const candidates = [
+  "button:has-text('Войти')", "button:has-text('Продолжить')",
+  "button:has-text('Далее')", "button[type='submit']", "form button",
+];
+```
+
+После клика ждём редирект с `id.ati.su` через `Promise.all([waitForURL, click])`.
+
+Двухшаговая форма (email → пароль) обрабатывается автоматически: если поле пароля не видно — сначала отправляем email.
+
+### 4. `page.evaluate()` — только один аргумент
+
+Playwright принимает ровно один аргумент в `page.evaluate()`. Несколько значений оборачиваются в объект:
+
+```javascript
+// ОШИБКА: "Too many arguments"
+await page.evaluate((txt, sel) => {...}, best, optSel);
+
+// ПРАВИЛЬНО:
+await page.evaluate(({ txt, sel }) => {...}, { txt: best, sel: optSel });
+```
+
+### 5. Фильтр городов — пропуск страновых значений
+
+ATI.SU принимает только города в поле поиска. Если фильтр содержит только название страны (например `to: "Россия"`), значение пропускается:
+
+```javascript
+const COUNTRY_NAMES = new Set(["Россия", "Казахстан", "Беларусь", ...]);
+const toVal = toRaw && !COUNTRY_NAMES.has(toRaw) ? toRaw : null;
+```
+
+### 6. Структура данных ATI.SU API
+
+Поля ответа `/loads/search`:
+
+| Поле в боте | Источник в JSON |
+|---|---|
+| `from` | `loading.location.city` + `route.country[0]` |
+| `to` | `unloading.location.city` + `route.country[-1]` |
+| `cargo` | `loading.loadingCargos[0].name` или `load.cargoType` |
+| `weight` | `load.weight` / `load.volume` |
+| `truck_type` | `truck.carTypes[]` → битовые ID → `ATI_CAR_TYPE` |
+| `price` | `rate.sum` (если > 0) или `rate.rateType` |
+| `distance` | `route.distance` |
+| `time` | `loading.firstDate` / `loading.lastDate` |
