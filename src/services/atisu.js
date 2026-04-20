@@ -57,20 +57,6 @@ export async function scrapeAtisu(filters) {
 
     // Extract directly from the captured loads array
     if (loadsJson?.loads?.length > 0) {
-      // Log sub-object keys so we can fix field mapping without guessing
-      try {
-        const r = loadsJson.loads[0];
-        const subKeys = (obj, name) => {
-          if (!obj) return `${name}=null`;
-          if (typeof obj !== "object") return `${name}=${JSON.stringify(obj).substring(0,60)}`;
-          return `${name}{${Object.keys(obj).join(",")}}`;
-        };
-        console.log(`[ATISU] sub-keys: ${subKeys(r.loading,"loading")} | ${subKeys(r.unloading,"unloading")} | ${subKeys(r.load,"load")} | ${subKeys(r.rate,"rate")} | ${subKeys(r.truck,"truck")}`);
-        if (r.loading) console.log(`[ATISU] loading: ${JSON.stringify(r.loading).substring(0, 400)}`);
-        if (r.unloading) console.log(`[ATISU] unloading: ${JSON.stringify(r.unloading).substring(0, 300)}`);
-        if (r.load) console.log(`[ATISU] load: ${JSON.stringify(r.load).substring(0, 300)}`);
-        if (r.rate) console.log(`[ATISU] rate: ${JSON.stringify(r.rate).substring(0, 300)}`);
-      } catch (_) {}
       const items = loadsJson.loads.map(parseApiItem).filter(Boolean);
       console.log(`[ATISU] extracted ${items.length} items from API (${loadsJson.loads.length} raw)`);
       items.slice(0, 3).forEach((it, i) =>
@@ -97,28 +83,34 @@ const ATI_COUNTRY = { RUS: "Россия", KAZ: "Казахстан", BLR: "Бе
 // ATI.SU truck carType bit values → Russian names
 const ATI_CAR_TYPE = { "1":"тент","2":"реф","4":"изотерм","8":"борт","16":"фург","32":"цистерна","64":"любой","128":"контейнер","256":"термос","512":"самосвал" };
 
+// Confirmed: city is at loading.location.city / unloading.location.city
 function atiCity(obj) {
   if (!obj) return "";
   if (typeof obj === "string") return obj;
-  return obj.cityName || obj.cityFullName || obj.fullName
-    || obj.city?.name || obj.city?.fullName || obj.city?.cityName
-    || obj.geo?.city?.name || obj.geo?.cityName || obj.geo?.city
+  return obj.location?.city          // ← confirmed path
+    || obj.cityName || obj.fullName
+    || obj.city?.name || obj.city?.fullName
+    || obj.geo?.city?.name || obj.geo?.cityName
     || obj.place?.cityName || obj.place?.name
-    || obj.address?.cityName || obj.address?.city
-    || obj.region?.cityName || obj.name || "";
+    || obj.address?.city || obj.name || "";
+}
+
+const ATI_MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : `${d.getDate()} ${ATI_MONTHS[d.getMonth()]}`;
 }
 
 function parseApiItem(it) {
-  // Confirmed top-level keys: route, truck, load, loading, unloading, rate
+  // Cities — confirmed: loading.location.city / unloading.location.city
   const loadingCity   = atiCity(it.loading);
   const unloadingCity = atiCity(it.unloading);
 
-  // route.country = "KAZ-RUS" → fallback country names for filter matching
   const routeParts  = (it.route?.country || "").split("-");
   const fromCountry = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[0]] || "") : "";
   const toCountry   = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[routeParts.length - 1]] || "") : "";
 
-  // Always append country so matchesFilters("Россия") can match "Москва, Россия"
   const from = loadingCity
     ? (fromCountry ? `${loadingCity}, ${fromCountry}` : loadingCity)
     : fromCountry;
@@ -126,43 +118,45 @@ function parseApiItem(it) {
     ? (toCountry ? `${unloadingCity}, ${toCountry}` : unloadingCity)
     : toCountry;
 
-  // Cargo — confirmed field name: `load` (not `cargo`)
-  const loadObj = it.load || {};
-  const cargo  = loadObj.name || loadObj.cargoName || loadObj.typeName || loadObj.type || "";
-  const weightVal = loadObj.weight ?? loadObj.tonnage ?? loadObj.weightMax ?? "";
-  const volVal    = loadObj.volume ?? loadObj.volumeMax ?? "";
-  const weight = weightVal !== "" && volVal !== "" ? `${weightVal}т / ${volVal}м³`
-    : weightVal !== "" ? `${weightVal}т`
-    : volVal !== "" ? `${volVal}м³` : "";
+  // Cargo — confirmed: load.cargoType = "ТНП"; also loading.loadingCargos[0].name
+  const loadObj   = it.load || {};
+  const cargoName = it.loading?.loadingCargos?.[0]?.name || loadObj.cargoType || loadObj.name || "";
+  const cargo     = cargoName;
 
-  // Truck — `truck.carTypes` is array of numeric IDs: ["1","8","16","64"]
+  // Weight / volume — confirmed: load.weight, load.volume (0 means not set)
+  const wt  = loadObj.weight  > 0 ? loadObj.weight  : null;
+  const vol = loadObj.volume  > 0 ? loadObj.volume  : null;
+  const weight = wt && vol ? `${wt}т / ${vol}м³`
+    : wt  ? `${wt}т`
+    : vol ? `${vol}м³` : "";
+
+  // Truck type — carTypes is array of bit IDs: ["1","8","16","64"]
   const truck_type = Array.isArray(it.truck?.carTypes)
     ? it.truck.carTypes.map(t => ATI_CAR_TYPE[String(t)] || t).join(", ")
-    : (it.truck?.carTypeName || it.truck?.carType || "");
+    : (it.truck?.carTypeName || "");
 
-  // Rate — confirmed field name: `rate` (was "[object Object]" → it's an object)
-  const rateObj   = it.rate || {};
-  const rateSum   = rateObj.sum ?? rateObj.rateSum ?? rateObj.value ?? rateObj.amount;
-  const rateCurr  = rateObj.currency === "RUB" ? "₽" : rateObj.currency === "EUR" ? "€" : (rateObj.currency || "");
-  const rateType  = rateObj.type || rateObj.rateType || "";
-  const price = rateSum != null && rateSum > 0
-    ? `${rateSum} ${rateCurr}`.trim()
-    : rateType === "request" || rateType === "negotiated" ? "запрос ставки"
-    : rateType === "hidden"  ? "скрыто"
-    : "";
-
-  const distNum = it.route?.distance ?? it.route?.totalDistance ?? "";
-  const distance = distNum !== "" ? `${distNum} км` : "";
-
-  // Loading date — from `loading` object, fallback to addDate date part
-  const time = it.loading?.date || it.loading?.dateFrom || it.loading?.firstDate
-    || it.loading?.dateStart || (it.addDate ? it.addDate.substring(0, 10) : "");
-
-  // Log loading/unloading structure if cities still empty (for future debugging)
-  if (!loadingCity && !unloadingCity) {
-    try { console.log(`[ATISU] loading obj: ${JSON.stringify(it.loading).substring(0, 300)}`); } catch (_) {}
-    try { console.log(`[ATISU] unloading obj: ${JSON.stringify(it.unloading).substring(0, 300)}`); } catch (_) {}
+  // Price — rate object has no `sum` field for public (unauthenticated) API calls.
+  // rateType: 0=fixed(hidden), 1=request, 2=hidden. isHidden=true means paywall.
+  const rateObj = it.rate || {};
+  let price = "";
+  if (it.isHidden) {
+    price = "скрыто (лицензия)";
+  } else if (rateObj.negotiation) {
+    price = "запрос ставки";
+  } else if (rateObj.rateType === 1) {
+    price = "запрос ставки";
+  } else if (rateObj.rateType === 2) {
+    price = "скрыто";
   }
+  // rateType=0 with actual sum — not returned for anonymous requests; leave empty
+
+  const distNum = it.route?.distance ?? "";
+  const distance = distNum ? `${distNum} км` : "";
+
+  // Date range from loading.firstDate / lastDate
+  const d1 = fmtDate(it.loading?.firstDate);
+  const d2 = fmtDate(it.loading?.lastDate);
+  const time = d1 && d2 && d1 !== d2 ? `готов ${d1}-${d2}` : d1 ? `готов ${d1}` : "";
 
   if (!from && !to) return null;
   return {
