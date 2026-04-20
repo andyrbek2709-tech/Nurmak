@@ -1,12 +1,9 @@
 import { chromium } from "playwright";
+import { rand } from "../utils/timing.js";
 
 const LOGIN_URL  = "https://id.ati.su";
 const SEARCH_URL = "https://loads.ati.su/";
 
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-function rand(min, max) { return delay(Math.floor(min + Math.random() * (max - min))); }
-
-// Extract first city name from "City, Country" or "City1, City2, Country"
 function firstCity(val) {
   if (!val) return null;
   return val.split(",")[0].trim();
@@ -29,6 +26,7 @@ export async function scrapeAtisu(filters) {
     // Track all non-asset requests to discover ATI.SU API endpoints
     const requestUrls = [];
     page.on("request", (req) => {
+      if (requestUrls.length >= 100) return;
       const url = req.url();
       if (url.includes("ati.su") && !/\.(js|css|png|jpg|ico|woff2?|svg|ttf|eot)(\?|$)/i.test(url)) {
         requestUrls.push(`${req.method()} ${url.substring(0, 150)}`);

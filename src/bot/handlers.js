@@ -4,11 +4,15 @@ import {
 } from "../services/supabase.js";
 import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters, runOnce, buildMessage } from "../services/fafa.js";
 
-const MANAGER_CHAT_ID = process.env.MANAGER_CHAT_ID;
+const MANAGER_CHAT_ID = String(process.env.MANAGER_CHAT_ID);
 
-// module-level bot reference for reminders
 let _bot = null;
 const reminders = new Map();
+
+export function clearAllReminders() {
+  for (const id of reminders.values()) clearTimeout(id);
+  reminders.clear();
+}
 
 export function registerHandlers(bot) {
   _bot = bot;
@@ -18,9 +22,13 @@ export function registerHandlers(bot) {
   bot.start(handleStart);
 
   // Commands must be registered before bot.on("text") — Telegraf runs middleware in order
-  bot.command("new", (ctx) => handleOwnerList(ctx, "new", "🆕 Новые заявки"));
-  bot.command("active", (ctx) => handleOwnerList(ctx, "in_progress", "🔄 В работе"));
-  bot.command("today", handleOwnerToday);
+  const ownerOnly = (fn) => (ctx) => {
+    if (String(ctx.chat?.id) !== MANAGER_CHAT_ID) return;
+    return fn(ctx);
+  };
+  bot.command("new", ownerOnly((ctx) => handleOwnerList(ctx, "new", "🆕 Новые заявки")));
+  bot.command("active", ownerOnly((ctx) => handleOwnerList(ctx, "in_progress", "🔄 В работе")));
+  bot.command("today", ownerOnly(handleOwnerToday));
   bot.command("monitor", handleMonitor);
   bot.command("filter", handleFilter);
   bot.command("search", handleSearchOnce);
@@ -142,13 +150,12 @@ async function handleCallback(ctx) {
         const isActive = await isMonitoringActive(chatId);
         await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) }).catch(() => {});
       } else if (country === "manual") {
-        filterAwait.set(chatId, field);
+        filterPending.set(chatId, { field, country: null });
         await ctx.answerCbQuery();
         const labels = { from: "Откуда", to: "Куда" };
         await ctx.reply(`Введите «${labels[field]}» вручную (например: «Алматы, Казахстан» или «-» чтобы убрать):`);
       } else {
-        // Country selected — now ask for city
-        filterStep.set(chatId, { field, country });
+        filterPending.set(chatId, { field, country });
         await ctx.answerCbQuery();
         const flag = { Казахстан: "🇰🇿", Россия: "🇷🇺", Беларусь: "🇧🇾", Узбекистан: "🇺🇿" }[country] || "🌍";
         await ctx.reply(
@@ -221,8 +228,8 @@ async function handleOwnerToday(ctx) {
 }
 
 // ─── Filter state machine ─────────────────────────────────────────────────────
-const filterAwait = new Map(); // chatId → "from" | "to"  (manual text entry)
-const filterStep  = new Map(); // chatId → { field, country }  (country→city flow)
+// chatId → { field, country|null } — pending text input for filter wizard
+const filterPending = new Map();
 
 async function buildFilterText(chatId) {
   const f = await getFilters(chatId);
@@ -346,31 +353,22 @@ export async function handleText(ctx) {
 
   const labels = { from: "Откуда", to: "Куда" };
 
-  // Step 2 of country→city flow
-  const step = filterStep.get(chatId);
-  if (step) {
-    filterStep.delete(chatId);
-    const { field, country } = step;
-    // "-" means search whole country, no city
-    const value = userMessage === "-" ? country : `${userMessage}, ${country}`;
+  const pending = filterPending.get(chatId);
+  if (pending) {
+    filterPending.delete(chatId);
+    const { field, country } = pending;
+    let value;
+    if (country) {
+      // country→city flow: "-" means search whole country
+      value = userMessage === "-" ? country : `${userMessage}, ${country}`;
+    } else {
+      // manual entry flow: "-" clears the filter
+      value = userMessage === "-" ? null : userMessage;
+    }
     await setFilter(chatId, field, value);
     const isActive = await isMonitoringActive(chatId);
     await ctx.reply(
-      `✅ ${labels[field]}: ${value}\n\n${await buildFilterText(chatId)}`,
-      { reply_markup: buildFilterKeyboard(isActive) }
-    );
-    return;
-  }
-
-  // Manual text entry (after "Другая страна")
-  const awaitField = filterAwait.get(chatId);
-  if (awaitField) {
-    filterAwait.delete(chatId);
-    const value = userMessage === "-" ? null : userMessage;
-    await setFilter(chatId, awaitField, value);
-    const isActive = await isMonitoringActive(chatId);
-    await ctx.reply(
-      `${value ? `✅ ${labels[awaitField]}: ${value}` : `✅ Фильтр «${labels[awaitField]}» убран`}\n\n${await buildFilterText(chatId)}`,
+      `${value ? `✅ ${labels[field]}: ${value}` : `✅ Фильтр «${labels[field]}» убран`}\n\n${await buildFilterText(chatId)}`,
       { reply_markup: buildFilterKeyboard(isActive) }
     );
     return;

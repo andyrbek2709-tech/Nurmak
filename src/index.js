@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { Telegraf } from "telegraf";
-import { registerHandlers } from "./bot/handlers.js";
+import { registerHandlers, clearAllReminders } from "./bot/handlers.js";
 
 const required = ["BOT_TOKEN", "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "MANAGER_CHAT_ID"];
 for (const key of required) {
@@ -39,5 +39,5 @@ if (process.env.WEBHOOK_DOMAIN) {
   console.log("Bot started in long-polling mode");
 }
 
-process.on("SIGTERM", () => { bot.stop("SIGTERM"); process.exit(0); });
-process.on("SIGINT", () => { bot.stop("SIGINT"); process.exit(0); });
+process.on("SIGTERM", () => { clearAllReminders(); bot.stop("SIGTERM"); process.exit(0); });
+process.on("SIGINT", () => { clearAllReminders(); bot.stop("SIGINT"); process.exit(0); });

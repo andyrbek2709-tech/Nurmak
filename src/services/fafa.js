@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { loadBotSetting, saveBotSetting } from "./supabase.js";
 import { scrapeAtisu } from "./atisu.js";
+import { delay, rand } from "../utils/timing.js";
 
 const FAFA_URL = "https://fa-fa.kz";
 const SEARCH_URL = `${FAFA_URL}/search_load/`;
@@ -147,13 +148,17 @@ async function tick(chatId) {
     const items = await scrape(u.filters);
     console.log(`[FAFA] fetched ${items.length} items for ${chatId}`);
 
-    const fresh = items.filter(i => {
-      const k = makeKey(i);
-      return k.length > 3 && !u.seenKeys.has(k);
-    });
-    const matched = fresh.filter(item => matchesFilters(item, u.filters));
+    const freshWithKeys = items
+      .map(i => [i, makeKey(i)])
+      .filter(([, k]) => k.length > 3 && !u.seenKeys.has(k));
+    const matched = freshWithKeys
+      .filter(([item]) => matchesFilters(item, u.filters))
+      .map(([item]) => item);
 
-    for (const item of fresh) u.seenKeys.add(makeKey(item));
+    for (const [, k] of freshWithKeys) {
+      if (u.seenKeys.size >= 5000) u.seenKeys.clear();
+      u.seenKeys.add(k);
+    }
 
     if (matched.length > 0) {
       for (const item of matched) await notify(item, chatId, true);
@@ -196,9 +201,6 @@ export function buildMessage(item, opts = {}) {
 }
 
 // ─── Scraper ──────────────────────────────────────────────────────────────────
-
-function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
-function rand(min, max) { return delay(Math.floor(min + Math.random() * (max - min))); }
 
 async function scrape(filters) {
   const [fafaResult, atisuResult] = await Promise.allSettled([
