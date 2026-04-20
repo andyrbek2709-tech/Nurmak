@@ -57,11 +57,19 @@ export async function scrapeAtisu(filters) {
 
     // Extract directly from the captured loads array
     if (loadsJson?.loads?.length > 0) {
-      // Log keys + extended JSON to identify real field names for city extraction
+      // Log sub-object keys so we can fix field mapping without guessing
       try {
         const r = loadsJson.loads[0];
-        console.log(`[ATISU] loads[0] keys: ${Object.keys(r).join(",")}`);
-        console.log(`[ATISU] loads[0] json: ${JSON.stringify(r).substring(0, 2000)}`);
+        const subKeys = (obj, name) => {
+          if (!obj) return `${name}=null`;
+          if (typeof obj !== "object") return `${name}=${JSON.stringify(obj).substring(0,60)}`;
+          return `${name}{${Object.keys(obj).join(",")}}`;
+        };
+        console.log(`[ATISU] sub-keys: ${subKeys(r.loading,"loading")} | ${subKeys(r.unloading,"unloading")} | ${subKeys(r.load,"load")} | ${subKeys(r.rate,"rate")} | ${subKeys(r.truck,"truck")}`);
+        if (r.loading) console.log(`[ATISU] loading: ${JSON.stringify(r.loading).substring(0, 400)}`);
+        if (r.unloading) console.log(`[ATISU] unloading: ${JSON.stringify(r.unloading).substring(0, 300)}`);
+        if (r.load) console.log(`[ATISU] load: ${JSON.stringify(r.load).substring(0, 300)}`);
+        if (r.rate) console.log(`[ATISU] rate: ${JSON.stringify(r.rate).substring(0, 300)}`);
       } catch (_) {}
       const items = loadsJson.loads.map(parseApiItem).filter(Boolean);
       console.log(`[ATISU] extracted ${items.length} items from API (${loadsJson.loads.length} raw)`);
@@ -91,10 +99,13 @@ const ATI_CAR_TYPE = { "1":"тент","2":"реф","4":"изотерм","8":"б�
 
 function atiCity(obj) {
   if (!obj) return "";
-  // Try every known nesting pattern for city name in loading/unloading objects
-  return obj.cityName || obj.cityFullName || obj.city?.name || obj.city?.fullName
-    || obj.place?.name || obj.place?.cityName || obj.geo?.cityName || obj.address?.city
-    || obj.name || "";
+  if (typeof obj === "string") return obj;
+  return obj.cityName || obj.cityFullName || obj.fullName
+    || obj.city?.name || obj.city?.fullName || obj.city?.cityName
+    || obj.geo?.city?.name || obj.geo?.cityName || obj.geo?.city
+    || obj.place?.cityName || obj.place?.name
+    || obj.address?.cityName || obj.address?.city
+    || obj.region?.cityName || obj.name || "";
 }
 
 function parseApiItem(it) {
@@ -140,7 +151,8 @@ function parseApiItem(it) {
     : rateType === "hidden"  ? "скрыто"
     : "";
 
-  const distance = it.route?.distance ?? "";
+  const distNum = it.route?.distance ?? it.route?.totalDistance ?? "";
+  const distance = distNum !== "" ? `${distNum} км` : "";
 
   // Loading date — from `loading` object, fallback to addDate date part
   const time = it.loading?.date || it.loading?.dateFrom || it.loading?.firstDate
@@ -355,8 +367,8 @@ async function fillSearchForm(page, filters) {
   await rand(3000, 4000);
   console.log(`[ATISU] search done, URL: ${page.url()}`);
 
-  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 1500));
-  console.log(`[ATISU] body snippet:`, bodySnip);
+  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 300).replace(/\n+/g, " "));
+  console.log(`[ATISU] body snippet: ${bodySnip}`);
 }
 
 async function extractItemsDom(page) {
