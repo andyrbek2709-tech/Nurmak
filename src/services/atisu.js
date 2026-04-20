@@ -360,112 +360,118 @@ async function extractItemsDom(page) {
     { timeout: 5000 }
   ).catch(() => {});
 
-  // Probe which CSS selectors exist in the results area
-  const classProbe = await page.evaluate(() => {
-    const probes = ["[class*='card']","[class*='Card']","[class*='row']","[class*='Row']",
-      "[class*='item']","[class*='Item']","[class*='load']","[class*='Load']",
-      "article","[data-testid]","[class*='Cargo']","[class*='Route']"];
-    return probes.map(sel => ({ sel, count: document.querySelectorAll(sel).length }))
-      .filter(x => x.count > 0 && x.count < 500);
-  });
-  console.log(`[ATISU] class probe:`, JSON.stringify(classProbe));
-
-  const { items, debug } = await page.evaluate(() => {
-    const TRUCK_KW  = /тент|реф|изот|борт|конт|цист|любая|открыт|термос/i;
-    const WEIGHT_RE = /\d[\d,]*\s*\/\s*[\d\-]/;
+  const result = await page.evaluate(() => {
     const DATE_KW   = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
-    const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
-    const KM_RE     = /\d[\d\s]*\s*км/;
     const CITY_RE   = /^[А-ЯЁ][а-яё]/;
+    const WEIGHT_RE = /\d[\d,]*\s*\/\s*[\d\-]/;
+    const KM_RE     = /\d[\d\s]*\s*км/;
+    const PRICE_KW  = /скрыто|запрос|руб|тнг|₽|нал|безнал/i;
+    const SKIP_TEXTS = new Set([
+      "Направл.", "Транспорт", "Вес,т / объём,м³, груз", "Маршрут", "Ставка",
+      "Упорядочить по", "Вид", "Выводить строк", "ПОКАЗАТЬ КОНТАКТЫ И СТАВКУ",
+      "Добавлены", "когда угодно", "Очистить",
+    ]);
 
-    // Find the results section anchor - element containing "Найдено"
-    const foundEl = Array.from(document.querySelectorAll("*")).find(el =>
-      el.children.length === 0 && /найдено\s+\d/i.test((el.textContent || "").trim())
-    );
+    const all = Array.from(document.querySelectorAll("*"));
 
-    // Get siblings/following elements after "Найдено" heading
-    // Walk up to find the results container
-    let resultsContainer = null;
-    if (foundEl) {
-      let cur = foundEl.parentElement;
+    // Find a leaf element by exact text
+    const findLeaf = (text) =>
+      all.find(el => el.children.length === 0 && (el.textContent || "").trim() === text);
+
+    // Get column container by walking up from header until element has 3+ siblings
+    const getColContainer = (headerEl) => {
+      if (!headerEl) return null;
+      let cur = headerEl.parentElement;
       for (let d = 0; d < 10; d++) {
         if (!cur) break;
-        const text = cur.innerText || "";
-        if (text.length > 500) { resultsContainer = cur; break; }
+        const siblings = cur.parentElement?.children?.length || 0;
+        const len = (cur.innerText || "").length;
+        if (siblings >= 3 && len >= 5 && len < 10000) return cur;
         cur = cur.parentElement;
       }
-    }
+      return null;
+    };
 
-    if (!resultsContainer) {
-      return { items: [], debug: { msg: "no resultsContainer" } };
-    }
-
-    // Find all row-like children that contain distance (км)
-    const rowEls = Array.from(resultsContainer.querySelectorAll("*")).filter(el => {
-      if (el.children.length === 0) return false;
-      const t = el.innerText || "";
-      return KM_RE.test(t) && DATE_KW.test(t) && t.length > 50 && t.length < 3000;
-    });
-
-    const results = [];
-    const seen = new Set();
-
-    for (const row of rowEls) {
-      const leafs = Array.from(row.querySelectorAll("*"))
+    // Extract all leaf texts from a column container, skipping header/nav texts
+    const colLeafs = (container, skipText) => {
+      if (!container) return [];
+      return Array.from(container.querySelectorAll("*"))
         .filter(el => el.children.length === 0 && (el.innerText || "").trim())
         .map(el => (el.innerText || "").trim())
-        .filter(Boolean);
+        .filter(t => t && t !== skipText && !SKIP_TEXTS.has(t));
+    };
 
-      if (leafs.length < 3) continue;
-      const key = leafs.slice(0, 5).join("|");
-      if (seen.has(key)) continue;
-      seen.add(key);
+    const routeH  = findLeaf("Маршрут");
+    const weightH = findLeaf("Вес,т / объём,м³, груз");
+    const rateH   = findLeaf("Ставка");
 
-      const distance   = (leafs.find(l => KM_RE.test(l)) || "").match(/(\d[\d\s]*\s*км)/)?.[1]?.trim() || "";
-      const truck_type = leafs.find(l => TRUCK_KW.test(l)) || "";
-      const wLeaf      = leafs.find(l => WEIGHT_RE.test(l)) || "";
-      const weight     = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
-      const cargo      = wLeaf.replace(/^[\d,. /\-\s]+/, "").trim() || "";
-      const price      = leafs.find(l => PRICE_KW.test(l)) || "";
+    const routeCol  = getColContainer(routeH);
+    const weightCol = getColContainer(weightH);
+    const rateCol   = getColContainer(rateH);
 
-      const dateIdx = leafs.findIndex(l => DATE_KW.test(l));
-      if (dateIdx < 0) continue;
+    const routeLeafs  = colLeafs(routeCol,  "Маршрут");
+    const weightLeafs = colLeafs(weightCol, "Вес,т / объём,м³, груз");
+    const rateLeafs   = colLeafs(rateCol,   "Ставка");
 
-      const dateLine = leafs[dateIdx];
-      let from = "", time = "";
-      const merged = dateLine.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
+    // Parse route leafs: sequence of [fromCity, date, toCity, (km?)] repeating
+    const items = [];
+    let i = 0;
+    while (i < routeLeafs.length && items.length < 50) {
+      const leaf = routeLeafs[i];
+      if (!CITY_RE.test(leaf) && !DATE_KW.test(leaf)) { i++; continue; }
+
+      let from = "", time = "", to = "";
+
+      // Merged: "Актауготов 19 апр."
+      const merged = leaf.match(/^([А-ЯЁ][а-яёА-ЯЁ\s\-]+?)(готов\b|погрузка\b|\d{1,2}[\s\-])/i);
       if (merged && merged[1].trim().length >= 2) {
         from = merged[1].trim();
-        time = dateLine.substring(merged[1].length).trim();
-      } else {
-        from = dateIdx > 0 ? leafs[dateIdx - 1] : "";
-        time = dateLine;
+        time = leaf.substring(merged[1].length).trim();
+        i++;
+      } else if (CITY_RE.test(leaf)) {
+        from = leaf; i++;
+        // skip non-meaningful items until date
+        while (i < routeLeafs.length && !DATE_KW.test(routeLeafs[i]) && !CITY_RE.test(routeLeafs[i]) && !KM_RE.test(routeLeafs[i])) i++;
+        if (i < routeLeafs.length && DATE_KW.test(routeLeafs[i])) { time = routeLeafs[i]; i++; }
+      } else { i++; continue; }
+
+      // Skip km after date
+      if (i < routeLeafs.length && KM_RE.test(routeLeafs[i])) i++;
+
+      // Skip non-city filler before destination
+      while (i < routeLeafs.length && !CITY_RE.test(routeLeafs[i]) && !KM_RE.test(routeLeafs[i])) i++;
+
+      if (i < routeLeafs.length && CITY_RE.test(routeLeafs[i])) {
+        to = routeLeafs[i]; i++;
+        if (i < routeLeafs.length && KM_RE.test(routeLeafs[i])) i++;
       }
 
-      // to: first Cyrillic-starting leaf AFTER date that is not a keyword
-      let to = "";
-      for (let i = dateIdx + 1; i < leafs.length; i++) {
-        const l = leafs[i];
-        if (CITY_RE.test(l) && l.length > 1 && l.length < 60 && !PRICE_KW.test(l) && !DATE_KW.test(l) && !TRUCK_KW.test(l)) {
-          to = l; break;
-        }
-      }
-
-      if (from && to && from !== to && CITY_RE.test(from)) {
-        results.push({ from, to, distance, cargo, weight, truck_type, price, time });
+      if (from && to && from !== to) {
+        const idx = items.length;
+        const wLeaf = weightLeafs[idx] || "";
+        const weight = wLeaf.match(/^([\d,. /]+)/)?.[1]?.trim() || "";
+        const cargo  = wLeaf.replace(/^[\d,. /\-\s]+/, "").trim();
+        const price  = rateLeafs[idx] || "";
+        items.push({ from, to, distance: "", cargo, weight, truck_type: "", price, time, source: "atisu" });
       }
     }
 
-    const debugRow = rowEls[0] ? (rowEls[0].innerText || "").slice(0, 200) : "no rows";
-    const debugLeafs = rowEls[0] ? Array.from(rowEls[0].querySelectorAll("*"))
-      .filter(el => el.children.length === 0 && (el.innerText || "").trim())
-      .map(el => (el.innerText || "").trim()).filter(Boolean).slice(0, 15) : [];
-
-    return { items: results, debug: { rows: rowEls.length, results: results.length, rowSample: debugRow, leafs: debugLeafs } };
+    return {
+      items,
+      debug: {
+        routeColCls: routeCol?.className?.substring(0, 60),
+        routeLeafs: routeLeafs.slice(0, 20),
+        weightLeafs: weightLeafs.slice(0, 10),
+        rateLeafs: rateLeafs.slice(0, 10),
+      },
+    };
   });
 
-  console.log(`[ATISU] DOM: rows=${debug.rows} parsed=${debug.results} final=${items.length}`);
-  console.log(`[ATISU] DOM row[0]:`, debug.rowSample);
-  console.log(`[ATISU] DOM leafs[0]:`, JSON.stringify(debug.leafs));
-  return items;
+  console.log(`[ATISU] DOM column-parse: ${result.items?.length} items`);
+  console.log(`[ATISU] routeLeafs:`, JSON.stringify(result.debug?.routeLeafs));
+  if (result.items?.length === 0) {
+    console.log(`[ATISU] weightLeafs:`, JSON.stringify(result.debug?.weightLeafs));
+    console.log(`[ATISU] routeColCls:`, result.debug?.routeColCls);
+  }
+  return result.items || [];
 }
