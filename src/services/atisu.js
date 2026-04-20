@@ -57,8 +57,12 @@ export async function scrapeAtisu(filters) {
 
     // Extract directly from the captured loads array
     if (loadsJson?.loads?.length > 0) {
-      // Log first record to verify field names
-      try { console.log(`[ATISU] loads[0]: ${JSON.stringify(loadsJson.loads[0]).substring(0, 500)}`); } catch (_) {}
+      // Log keys + extended JSON to identify real field names for city extraction
+      try {
+        const r = loadsJson.loads[0];
+        console.log(`[ATISU] loads[0] keys: ${Object.keys(r).join(",")}`);
+        console.log(`[ATISU] loads[0] json: ${JSON.stringify(r).substring(0, 2000)}`);
+      } catch (_) {}
       const items = loadsJson.loads.map(parseApiItem).filter(Boolean);
       console.log(`[ATISU] extracted ${items.length} items from API (${loadsJson.loads.length} raw)`);
       items.slice(0, 3).forEach((it, i) =>
@@ -80,44 +84,58 @@ export async function scrapeAtisu(filters) {
 }
 
 
+const ATI_COUNTRY = { RUS: "Россия", KAZ: "Казахстан", BLR: "Беларусь", UKR: "Украина", UZB: "Узбекистан", KGZ: "Кыргызстан", TJK: "Таджикистан" };
+
 function parseApiItem(it) {
-  // ATI.SU public API v1.0: Loading / Unloading objects with nested city info
-  const loadingCity = it.Loading?.City?.Name || it.Loading?.CityName || it.Loading?.city?.name
-    || it.Loading?.city || it.loading?.city?.name || it.loading?.cityName || "";
-  const unloadingCity = it.Unloading?.City?.Name || it.Unloading?.CityName || it.Unloading?.city?.name
-    || it.Unloading?.city || it.unloading?.city?.name || it.unloading?.cityName || "";
+  // Try all known camelCase / PascalCase variants for loading/unloading city
+  const loadingCity =
+    it.loading?.city?.name || it.loading?.cityName || it.loading?.place?.name
+    || it.loading?.placeName || it.loading?.geo?.city || it.loading?.address?.city
+    || it.Loading?.City?.Name || it.Loading?.CityName || it.Loading?.city?.name || "";
 
-  // Fallback to other common naming patterns
+  const unloadingCity =
+    it.unloading?.city?.name || it.unloading?.cityName || it.unloading?.place?.name
+    || it.unloading?.placeName || it.unloading?.geo?.city || it.unloading?.address?.city
+    || it.Unloading?.City?.Name || it.Unloading?.CityName || it.Unloading?.city?.name || "";
+
+  // route.country = "KAZ-RUS" → split into from/to country codes
+  const routeParts = (it.route?.country || "").split("-");
+  const fromCountry = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[0]] || routeParts[0]) : "";
+  const toCountry   = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[routeParts.length - 1]] || routeParts[routeParts.length - 1]) : "";
+
+  // City + country suffix ensures matchesFilters("Россия") works for Russian cities
   const from = loadingCity
-    || it.fromCity?.name || it.from?.city?.name || it.from?.name
-    || it.origin?.city || it.loadingCity || it.cityFrom?.name || it.cityFrom
-    || it.departureCity || "";
+    ? (fromCountry ? `${loadingCity}, ${fromCountry}` : loadingCity)
+    : (fromCountry
+        || it.fromCity?.name || it.from?.city?.name || it.from?.name || it.loadingCity || "");
+
   const to = unloadingCity
-    || it.toCity?.name || it.to?.city?.name || it.to?.name
-    || it.destination?.city || it.unloadingCity || it.cityTo?.name || it.cityTo
-    || it.arrivalCity || "";
+    ? (toCountry ? `${unloadingCity}, ${toCountry}` : unloadingCity)
+    : (toCountry
+        || it.toCity?.name || it.to?.city?.name || it.to?.name || it.unloadingCity || "");
 
-  // Cargo: ATI.SU uses Cargo object; fallback to flat fields
-  const cargo = it.Cargo?.Name || it.Cargo?.type || it.cargo?.name || it.cargo
+  // Cargo — API uses lowercase `cargo` object
+  const cargo = it.cargo?.name || it.cargo?.type || it.Cargo?.Name
     || it.cargoName || it.freightName || "";
-  const weight = it.Cargo?.Weight ?? it.Cargo?.weight ?? it.weight ?? it.tonnage ?? "";
+  const weight = it.cargo?.weight ?? it.cargo?.Weight ?? it.Cargo?.Weight ?? it.weight ?? "";
 
-  // Price: ATI.SU uses Payment object
-  const rateSum = it.Payment?.RateSum ?? it.Payment?.rateSum ?? it.Payment?.FixedRate;
-  const currency = it.Payment?.CurrencyId === 1 ? "₽" : it.Payment?.CurrencyId === 2 ? "€" : "";
-  const price = rateSum != null
-    ? `${rateSum}${currency}`
-    : (it.price || it.rate || it.cost || "");
+  // Price — API uses lowercase `price` object
+  const rateSum = it.price?.sum ?? it.price?.rate ?? it.price?.rateSum
+    ?? it.Payment?.RateSum ?? it.payment?.rateSum ?? null;
+  const currCode = it.price?.currency || it.payment?.currency || "";
+  const currency = currCode === "RUB" || currCode === "1" ? "₽" : currCode === "EUR" ? "€" : "";
+  const price = rateSum != null ? `${rateSum}${currency}` : (it.rate || it.cost || "");
 
-  // Truck: ATI.SU uses Transport object
-  const truck_type = it.Transport?.CarType || it.Transport?.carType
+  // Truck type — API uses lowercase `truck` object
+  const carTypes = Array.isArray(it.truck?.carTypes) ? it.truck.carTypes.join(",") : "";
+  const truck_type = carTypes || it.truck?.carType
     || it.truckType?.name || it.truckType || it.bodyType?.name || it.bodyType || "";
 
-  const distance = it.Distance ?? it.distance ?? "";
+  const distance = it.route?.distance ?? it.Distance ?? it.distance ?? "";
 
-  // Dates: ATI.SU uses FirstDate / LastDate
-  const time = it.FirstDate || it.LastDate || it.firstDate || it.lastDate
-    || it.loadingDate || it.departureDate || it.readyAt || "";
+  // Dates — API uses addDate/changeDate; loading may have its own date
+  const time = it.loading?.date || it.loading?.dateFrom
+    || it.addDate || it.firstDate || it.loadingDate || "";
 
   if (!from && !to) return null;
   return {
