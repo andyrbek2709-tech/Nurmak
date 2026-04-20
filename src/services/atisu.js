@@ -1,93 +1,39 @@
 import { chromium } from "playwright";
 import { rand } from "../utils/timing.js";
+import { existsSync } from "fs";
 
-const LOGIN_URL  = "https://id.ati.su";
-const SEARCH_URL = "https://loads.ati.su/";
+const LOGIN_URL   = "https://id.ati.su";
+const SEARCH_URL  = "https://loads.ati.su/";
+const SESSION_PATH = "/tmp/atisu_session.json";
 
 function firstCity(val) {
   if (!val) return null;
   return val.split(",")[0].trim();
 }
 
-export async function scrapeAtisu(filters) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+const ATI_COUNTRY = {
+  RUS: "Россия", KAZ: "Казахстан", BLR: "Беларусь", UKR: "Украина",
+  UZB: "Узбекистан", KGZ: "Кыргызстан", TJK: "Таджикистан",
+  ARM: "Армения", AZE: "Азербайджан", GEO: "Грузия", MDA: "Молдова",
+};
 
-  try {
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      locale: "ru-RU",
-      viewport: { width: 1280, height: 900 },
-    });
-    const page = await context.newPage();
+const ATI_CAR_TYPE = {
+  "1":"тент","2":"реф","4":"изотерм","8":"борт","16":"фург",
+  "32":"цистерна","64":"любой","128":"контейнер","256":"термос","512":"самосвал",
+};
 
-    await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await rand(1500, 2000);
+const ATI_MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
 
-    const needsLogin = await page.evaluate(() =>
-      !!document.querySelector("a[href*='login'], a[href*='signin'], [data-test='login-btn']")
-      || !document.cookie.includes("atiauth")
-    );
-    if (needsLogin) await doLogin(page);
-
-    await page.goto(SEARCH_URL, { waitUntil: "networkidle", timeout: 30000 });
-    await rand(1000, 1500);
-
-    // Set up waitForResponse BEFORE clicking search — this avoids the race condition
-    // where response.json() resolves after we've already checked apiResponses
-    const loadsPromise = page.waitForResponse(
-      resp => resp.url().includes("/loads/search") && resp.status() === 200,
-      { timeout: 25000 }
-    ).catch(() => null);
-
-    await fillSearchForm(page, filters);
-
-    const loadsResp = await loadsPromise;
-    let loadsJson = null;
-    if (loadsResp) {
-      loadsJson = await loadsResp.json().catch(() => null);
-      console.log(`[ATISU] loads/search captured: totalItems=${loadsJson?.totalItems}, loads=${loadsJson?.loads?.length}`);
-    } else {
-      console.log(`[ATISU] loads/search not captured (timeout or no request)`);
-    }
-
-    console.log(`[ATISU] scraping URL: ${page.url()}`);
-
-    // Extract directly from the captured loads array
-    if (loadsJson?.loads?.length > 0) {
-      const items = loadsJson.loads.map(parseApiItem).filter(Boolean);
-      console.log(`[ATISU] extracted ${items.length} items from API (${loadsJson.loads.length} raw)`);
-      items.slice(0, 3).forEach((it, i) =>
-        console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
-      );
-      if (items.length > 0) return items;
-    }
-
-    // Fallback: DOM card extraction
-    console.log(`[ATISU] API extraction got 0, trying DOM...`);
-    const domItems = await extractItemsDom(page);
-    domItems.slice(0, 3).forEach((it, i) =>
-      console.log(`[ATISU] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" price="${it.price}"`)
-    );
-    return domItems;
-  } finally {
-    await browser.close();
-  }
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : `${d.getDate()} ${ATI_MONTHS[d.getMonth()]}`;
 }
 
-
-const ATI_COUNTRY = { RUS: "Россия", KAZ: "Казахстан", BLR: "Беларусь", UKR: "Украина", UZB: "Узбекистан", KGZ: "Кыргызстан", TJK: "Таджикистан" };
-
-// ATI.SU truck carType bit values → Russian names
-const ATI_CAR_TYPE = { "1":"тент","2":"реф","4":"изотерм","8":"борт","16":"фург","32":"цистерна","64":"любой","128":"контейнер","256":"термос","512":"самосвал" };
-
-// Confirmed: city is at loading.location.city / unloading.location.city
 function atiCity(obj) {
   if (!obj) return "";
   if (typeof obj === "string") return obj;
-  return obj.location?.city          // ← confirmed path
+  return obj.location?.city
     || obj.cityName || obj.fullName
     || obj.city?.name || obj.city?.fullName
     || obj.geo?.city?.name || obj.geo?.cityName
@@ -95,21 +41,13 @@ function atiCity(obj) {
     || obj.address?.city || obj.name || "";
 }
 
-const ATI_MONTHS = ["янв","фев","мар","апр","май","июн","июл","авг","сен","окт","ноя","дек"];
-function fmtDate(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? "" : `${d.getDate()} ${ATI_MONTHS[d.getMonth()]}`;
-}
-
 function parseApiItem(it) {
-  // Cities — confirmed: loading.location.city / unloading.location.city
   const loadingCity   = atiCity(it.loading);
   const unloadingCity = atiCity(it.unloading);
 
   const routeParts  = (it.route?.country || "").split("-");
-  const fromCountry = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[0]] || "") : "";
-  const toCountry   = routeParts.length >= 2 ? (ATI_COUNTRY[routeParts[routeParts.length - 1]] || "") : "";
+  const fromCountry = ATI_COUNTRY[routeParts[0]] || "";
+  const toCountry   = ATI_COUNTRY[routeParts[routeParts.length - 1]] || "";
 
   const from = loadingCity
     ? (fromCountry ? `${loadingCity}, ${fromCountry}` : loadingCity)
@@ -118,31 +56,26 @@ function parseApiItem(it) {
     ? (toCountry ? `${unloadingCity}, ${toCountry}` : unloadingCity)
     : toCountry;
 
-  // Cargo — confirmed: load.cargoType = "ТНП"; also loading.loadingCargos[0].name
-  const loadObj   = it.load || {};
-  const cargoName = it.loading?.loadingCargos?.[0]?.name || loadObj.cargoType || loadObj.name || "";
-  const cargo     = cargoName;
+  if (!from && !to) return null;
 
-  // Weight / volume — confirmed: load.weight, load.volume (0 means not set)
-  const wt  = loadObj.weight  > 0 ? loadObj.weight  : null;
-  const vol = loadObj.volume  > 0 ? loadObj.volume  : null;
-  const weight = wt && vol ? `${wt}т / ${vol}м³`
-    : wt  ? `${wt}т`
-    : vol ? `${vol}м³` : "";
+  const loadObj = it.load || {};
+  const cargo   = it.loading?.loadingCargos?.[0]?.name || loadObj.cargoType || loadObj.name || "";
 
-  // Truck type — carTypes is array of bit IDs: ["1","8","16","64"]
+  const wt  = loadObj.weight > 0 ? loadObj.weight : null;
+  const vol = loadObj.volume > 0 ? loadObj.volume : null;
+  const weight = wt && vol ? `${wt}т / ${vol}м³` : wt ? `${wt}т` : vol ? `${vol}м³` : "";
+
   const truck_type = Array.isArray(it.truck?.carTypes)
-    ? it.truck.carTypes.map(t => ATI_CAR_TYPE[String(t)] || t).join(", ")
+    ? it.truck.carTypes.map(t => ATI_CAR_TYPE[String(t)] || t).filter(Boolean).join(", ")
     : (it.truck?.carTypeName || "");
 
-  // Price — after login rate.sum may be available; rateType 1=request, 2=hidden
   const rateObj = it.rate || {};
   let price = "";
   if (it.isHidden) {
     price = "скрыто (лицензия)";
   } else if (rateObj.sum > 0) {
-    const currency = rateObj.currency || "₽";
-    price = `${rateObj.sum.toLocaleString("ru-RU")} ${currency}`;
+    const cur = rateObj.currency || "₽";
+    price = `${rateObj.sum.toLocaleString("ru-RU")} ${cur}`;
     if (rateObj.rateUnitType === 1) price += "/т";
     else if (rateObj.rateUnitType === 2) price += "/км";
   } else if (rateObj.negotiation || rateObj.rateType === 1) {
@@ -151,15 +84,12 @@ function parseApiItem(it) {
     price = "скрыто";
   }
 
-  const distNum = it.route?.distance ?? "";
-  const distance = distNum ? `${distNum} км` : "";
+  const distance = it.route?.distance ? `${it.route.distance} км` : "";
 
-  // Date range from loading.firstDate / lastDate
   const d1 = fmtDate(it.loading?.firstDate);
   const d2 = fmtDate(it.loading?.lastDate);
   const time = d1 && d2 && d1 !== d2 ? `готов ${d1}-${d2}` : d1 ? `готов ${d1}` : "";
 
-  if (!from && !to) return null;
   return {
     from: String(from), to: String(to),
     cargo: String(cargo), weight: String(weight),
@@ -169,204 +99,277 @@ function parseApiItem(it) {
   };
 }
 
+export async function scrapeAtisu(filters) {
+  const browser = await chromium.launch({
+    headless: true,
+    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+  });
+
+  try {
+    const contextOpts = {
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      locale: "ru-RU",
+      viewport: { width: 1280, height: 900 },
+    };
+    if (existsSync(SESSION_PATH)) {
+      contextOpts.storageState = SESSION_PATH;
+      console.log("[ATISU] loading saved session from", SESSION_PATH);
+    }
+
+    const context = await browser.newContext(contextOpts);
+    const page    = await context.newPage();
+
+    // Use page.route() to intercept loads/search — no async race condition
+    // route.fetch() preserves browser cookies (auth session)
+    let capturedLoads = null;
+    await page.route(/\/loads\/search(\?|$)/, async (route) => {
+      try {
+        const resp = await route.fetch();
+        const json = await resp.json().catch(() => null);
+        if (json?.loads) {
+          capturedLoads = json;
+          console.log(`[ATISU] intercepted loads/search: totalItems=${json.totalItems}, loads=${json.loads.length}`);
+        }
+        await route.fulfill({ response: resp });
+      } catch (e) {
+        console.log(`[ATISU] route handler error: ${e.message}`);
+        await route.continue();
+      }
+    });
+
+    // Navigate to search — may trigger initial loads/search automatically
+    await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await rand(1000, 1500);
+
+    // Check if redirected to login or login link visible
+    const onLoginPage = page.url().includes("id.ati.su");
+    const hasLoginLink = !onLoginPage && !!(await page.$("a[href*='id.ati.su']"));
+
+    if ((onLoginPage || hasLoginLink) && process.env.ATISU_LOGIN && process.env.ATISU_PASSWORD) {
+      console.log("[ATISU] not authenticated — logging in...");
+      if (!onLoginPage) await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await doLogin(page);
+      try {
+        await context.storageState({ path: SESSION_PATH });
+        console.log("[ATISU] session saved to", SESSION_PATH);
+      } catch (e) {
+        console.log("[ATISU] session save failed:", e.message);
+      }
+      await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await rand(1000, 1500);
+    }
+
+    // Wait for initial page load + its auto-search to complete
+    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+    await rand(500, 800);
+
+    const hasFilters = !!(filters.from || filters.to);
+    if (hasFilters) {
+      // Reset so we capture only the filtered response
+      capturedLoads = null;
+      await fillSearchForm(page, filters);
+    }
+
+    if (capturedLoads?.loads?.length > 0) {
+      const items = capturedLoads.loads.map(parseApiItem).filter(Boolean);
+      console.log(`[ATISU] extracted ${items.length} items (${capturedLoads.loads.length} raw)`);
+      items.slice(0, 3).forEach((it, i) =>
+        console.log(`[ATISU] [${i}] ${it.from} → ${it.to} | ${it.cargo} | ${it.weight} | ${it.truck_type} | ${it.price}`)
+      );
+      return items;
+    }
+
+    console.log("[ATISU] no API response captured, falling back to DOM...");
+    return extractItemsDom(page);
+
+  } finally {
+    await browser.close();
+  }
+}
+
 async function doLogin(page) {
   const login    = process.env.ATISU_LOGIN;
   const password = process.env.ATISU_PASSWORD;
-  if (!login || !password) throw new Error("ATISU_LOGIN / ATISU_PASSWORD env vars missing");
 
-  console.log(`[ATISU] logging in...`);
-  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  console.log("[ATISU] starting login...");
+  if (!page.url().includes("id.ati.su")) {
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+  }
   await rand(1500, 2000);
 
-  // Step 1: fill login field (email/phone)
-  const loginSel = "input[name='login'], input[name='email'], input[type='email'], input[placeholder*='Email'], input[placeholder*='mail'], input[placeholder*='логин'], input[placeholder*='телефон']";
-  await page.waitForSelector(loginSel, { timeout: 15000 });
+  const loginSel = [
+    "input[name='login']", "input[name='email']", "input[type='email']",
+    "input[placeholder*='Email']", "input[placeholder*='email']",
+    "input[placeholder*='Телефон']", "input[placeholder*='логин']",
+  ].join(", ");
+
+  await page.waitForSelector(loginSel, { timeout: 15000, state: "visible" });
   await page.fill(loginSel, login);
+  console.log("[ATISU] filled login field");
   await rand(400, 700);
 
-  // Step 2: fill password field
-  const passSel = "input[type='password'], input[name='password']";
-  const passEl = await page.$(passSel);
-  if (passEl) {
-    await page.fill(passSel, password);
-    await rand(400, 700);
-    await submitLoginForm(page);
-    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-    await rand(1500, 2500);
-    console.log(`[ATISU] after fill+submit URL: ${page.url()}`);
-  } else {
-    // Two-step login: submit email first, then password appears
-    await submitLoginForm(page);
-    await page.waitForSelector(passSel, { timeout: 10000 });
-    await page.fill(passSel, password);
-    await rand(400, 700);
-    await submitLoginForm(page);
-    await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-    await rand(1500, 2500);
-    console.log(`[ATISU] two-step login done URL: ${page.url()}`);
+  const passSel = "input[type='password']";
+  const passVisible = await page.$(passSel).then(el => el?.isVisible().catch(() => false)).catch(() => false);
+
+  if (!passVisible) {
+    // Two-step: email first, then password appears on next screen
+    console.log("[ATISU] two-step: submitting email first...");
+    await submitForm(page);
+    await page.waitForSelector(passSel, { timeout: 15000, state: "visible" }).catch(() => {});
   }
+
+  const passEl = await page.$(passSel);
+  if (passEl && await passEl.isVisible().catch(() => false)) {
+    await page.fill(passSel, password);
+    console.log("[ATISU] filled password field");
+    await rand(400, 700);
+  } else {
+    console.log("[ATISU] WARNING: password field not found/visible");
+  }
+
+  // Click submit and wait for redirect away from id.ati.su
+  await Promise.all([
+    page.waitForURL(url => !url.includes("id.ati.su"), { timeout: 30000 }).catch(() => {}),
+    submitForm(page),
+  ]);
 
   const afterUrl = page.url();
   console.log(`[ATISU] login done, URL: ${afterUrl}`);
+  if (afterUrl.includes("id.ati.su")) {
+    console.log("[ATISU] WARNING: still on id.ati.su — login may have failed");
+  }
 }
 
-async function submitLoginForm(page) {
-  // Try buttons by priority: text match, then any visible button
-  const selectors = [
+async function submitForm(page) {
+  const candidates = [
     "button:has-text('Войти')",
-    "button:has-text('Вход')",
     "button:has-text('Продолжить')",
+    "button:has-text('Далее')",
+    "button:has-text('Вход')",
     "button:has-text('Sign in')",
+    "button:has-text('Log in')",
     "button[type='submit']",
     "input[type='submit']",
-    "button",
+    "form button",
   ];
-  for (const sel of selectors) {
-    const btn = await page.$(sel);
-    if (btn && await btn.isVisible()) {
-      const txt = await btn.textContent().catch(() => "");
-      console.log(`[ATISU] clicking: ${sel} text="${txt?.trim()}"`);
-      await btn.click();
-      return;
-    }
+  for (const sel of candidates) {
+    try {
+      const btn = await page.$(sel);
+      if (btn && await btn.isVisible()) {
+        const txt = (await btn.textContent().catch(() => "")).trim();
+        console.log(`[ATISU] submit: clicking "${txt || sel}"`);
+        await btn.click();
+        return;
+      }
+    } catch {}
   }
-  // Fallback: press Enter on the active input
-  console.log(`[ATISU] no button found, pressing Enter`);
+  console.log("[ATISU] submit: no button found, pressing Enter");
   await page.keyboard.press("Enter");
 }
 
 async function fillSearchForm(page, filters) {
-  if (!filters.from && !filters.to) return;
-
-  // Use only the first city for ATI.SU (no multi-city support)
   const fromVal = firstCity(filters.from);
   const toVal   = firstCity(filters.to);
-  console.log(`[ATISU] fillSearchForm: from="${fromVal}" to="${toVal}" (raw: from="${filters.from}" to="${filters.to}")`);
+  if (!fromVal && !toVal) return;
 
-  const fillReactInput = async (label, selectorList, value) => {
+  console.log(`[ATISU] fillSearchForm: from="${fromVal}" to="${toVal}"`);
+
+  const fillCity = async (label, selectors, value) => {
     if (!value) return;
 
     let handle = null;
-    let matchedSel = null;
-    for (const sel of selectorList) {
+    for (const sel of selectors) {
       try {
-        handle = await page.waitForSelector(sel, { timeout: 3000, state: "visible" });
-        matchedSel = sel;
-        break;
-      } catch (_) {}
+        handle = await page.waitForSelector(sel, { timeout: 4000, state: "visible" });
+        if (handle) { console.log(`[ATISU] ${label}: matched "${sel}"`); break; }
+      } catch {}
     }
-    if (!handle) { console.log(`[ATISU] ${label}: no input found`); return; }
-    console.log(`[ATISU] ${label}: matched "${matchedSel}"`);
+    if (!handle) { console.log(`[ATISU] ${label}: input not found`); return; }
 
+    // Clear via React's native value setter, then type
     await page.evaluate((el) => {
       el.focus();
-      const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-      nativeSetter.call(el, "");
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+      setter.call(el, "");
       el.dispatchEvent(new Event("input", { bubbles: true }));
     }, handle);
-    await rand(200, 300);
-    await page.evaluate((el) => el.focus(), handle);
+    await rand(150, 250);
+    await handle.focus();
     await page.keyboard.type(value, { delay: 80 });
-    await rand(1200, 1600);
+    await rand(1200, 1800);
 
+    // Wait for dropdown options
+    const optSel = "[role='option'], [class*='option']:not([class*='optionList']), li[data-value]";
     try {
-      await page.waitForSelector("[role='option']", { timeout: 5000 });
-    } catch (_) {
+      await page.waitForSelector(optSel, { timeout: 5000 });
+    } catch {
       console.log(`[ATISU] ${label}: no dropdown appeared`);
       return;
     }
 
-    const options = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("[role='option']"))
-        .filter(el => el.offsetParent !== null)
-        .map(el => el.textContent?.trim() || "")
-        .filter(Boolean)
+    const options = await page.$$eval(optSel, (els) =>
+      els.filter(el => el.offsetParent !== null).map(el => el.textContent?.trim()).filter(Boolean)
     );
-    console.log(`[ATISU] ${label}: options:`, JSON.stringify(options));
+    console.log(`[ATISU] ${label}: options=${JSON.stringify(options.slice(0, 5))}`);
 
     const vl = value.toLowerCase();
     const best = options.find(t => t.toLowerCase() === vl)
       || options.find(t => t.toLowerCase().startsWith(vl + ","))
       || options.find(t => t.toLowerCase().startsWith(vl + " "))
+      || options.find(t => t.toLowerCase().includes(vl))
       || options[0];
 
-    if (!best) { console.log(`[ATISU] ${label}: no option to click`); return; }
+    if (!best) { console.log(`[ATISU] ${label}: no matching option`); return; }
 
-    const clicked = await page.evaluate((text) => {
-      const items = Array.from(document.querySelectorAll("[role='option']"));
-      const item = items.find(el => el.offsetParent !== null && el.textContent?.trim() === text);
-      if (item) { item.click(); return true; }
+    const clicked = await page.evaluate((txt, sel) => {
+      const items = Array.from(document.querySelectorAll(sel));
+      const el = items.find(e => e.offsetParent !== null && e.textContent?.trim() === txt);
+      if (el) { el.click(); return true; }
       return false;
-    }, best);
-    console.log(`[ATISU] ${label}: ${clicked ? `clicked "${best}"` : "click failed"}`);
-    await rand(600, 900);
+    }, best, optSel);
+
+    console.log(`[ATISU] ${label}: ${clicked ? `selected "${best}"` : "click failed"}`);
+    await rand(500, 800);
   };
 
-  const fromSelectors = [
+  const fromSels = [
     "input[placeholder*='Например, Москва']",
-    "[class*='From'] input", "[class*='from'] input",
     "input[placeholder*='Откуда']", "input[placeholder*='откуда']",
+    "[class*='From'] input", "[class*='from'] input",
+    "[class*='origin'] input", "[class*='Origin'] input",
   ];
-  const toSelectors = [
+  const toSels = [
     "input[placeholder*='Например, Санкт-Петербург']",
-    "[class*='To'] input", "[class*='to'] input",
     "input[placeholder*='Куда']", "input[placeholder*='куда']",
+    "[class*='To'] input",
+    "[class*='destination'] input", "[class*='Destination'] input",
   ];
 
-  if (fromVal) await fillReactInput("from", fromSelectors, fromVal);
-  if (toVal)   await fillReactInput("to",   toSelectors,   toVal);
+  if (fromVal) await fillCity("from", fromSels, fromVal);
+  if (toVal)   await fillCity("to",   toSels,   toVal);
+  await rand(1500, 2000);
 
-  await rand(2000, 2500);
-
-  const submitted = await page.evaluate(() => {
-    const SKIP = /выбрать\s*список|очистить|добавить|войти|регистр|фильтр/i;
+  // Find and click search button
+  const searchClicked = await page.evaluate(() => {
     const allBtns = Array.from(document.querySelectorAll("button"));
-    const byText = allBtns.find(b => {
+    const btn = allBtns.find(b => {
       const t = (b.innerText || "").trim();
-      return /^найти\s*груз/i.test(t) || /^обновить/i.test(t) || /^найти$/i.test(t);
+      return /^найти\s*(груз)?$/i.test(t) || /^обновить$/i.test(t);
     });
-    if (byText) { byText.click(); return `text: "${(byText.innerText || "").trim()}"`; }
-
-    const fromInput = document.querySelector("input[placeholder*='Например, Москва']");
-    if (fromInput) {
-      let el = fromInput.parentElement;
-      for (let depth = 0; depth < 10; depth++) {
-        if (!el) break;
-        const btns = Array.from(el.querySelectorAll("button")).filter(b => {
-          const t = (b.innerText || "").trim();
-          return t.length > 0 && t.length < 40 && !SKIP.test(t);
-        });
-        if (btns.length > 0) {
-          const btn = btns[btns.length - 1];
-          btn.click();
-          return `form-container: "${(btn.innerText || "").trim()}"`;
-        }
-        el = el.parentElement;
-      }
-    }
+    if (btn) { btn.click(); return `"${(btn.innerText || "").trim()}"`; }
     return null;
   });
 
-  if (submitted) {
-    console.log(`[ATISU] search submitted via ${submitted}`);
+  if (searchClicked) {
+    console.log(`[ATISU] search clicked: ${searchClicked}`);
   } else {
-    await page.evaluate(() => {
-      const toInput = document.querySelector("input[placeholder*='Например, Санкт-Петербург']");
-      if (toInput) {
-        toInput.focus();
-        toInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
-        toInput.dispatchEvent(new KeyboardEvent("keyup",   { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
-      }
-    });
-    console.log(`[ATISU] search submitted via keyboard Enter`);
+    await page.keyboard.press("Enter");
+    console.log("[ATISU] search submitted via Enter");
   }
 
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  await rand(3000, 4000);
+  await rand(2000, 3000);
   console.log(`[ATISU] search done, URL: ${page.url()}`);
-
-  const bodySnip = await page.evaluate(() => document.body.innerText.slice(0, 300).replace(/\n+/g, " "));
-  console.log(`[ATISU] body snippet: ${bodySnip}`);
 }
 
 async function extractItemsDom(page) {
@@ -387,31 +390,26 @@ async function extractItemsDom(page) {
 
     const all = Array.from(document.querySelectorAll("*"));
 
-    // Find "Найдено N груза" leaf element
     const foundEl = all.find(el =>
       el.children.length === 0 && /найдено\s+\d/i.test((el.textContent || "").trim())
     );
     if (!foundEl) return { items: [], debug: "no Найдено element" };
 
-    // Collect ALL leaf elements in DOM order, find position of foundEl
     const allLeafs = all.filter(el =>
       el.children.length === 0 && (el.innerText || "").trim()
     );
     const foundIdx = allLeafs.indexOf(foundEl);
     if (foundIdx < 0) return { items: [], debug: "Найдено not in leaf list" };
 
-    // Get all leaf texts AFTER "Найдено" — these are the sequential result cards
     const afterLeafs = allLeafs.slice(foundIdx + 1)
       .map(el => (el.innerText || "").trim())
       .filter(t => t && !NAV_SKIP.test(t));
 
-    // Also collect weight data from BEFORE "Найдено" (weight column renders early)
     const beforeLeafs = allLeafs.slice(0, foundIdx)
       .map(el => (el.innerText || "").trim())
       .filter(Boolean);
     const preWeights = beforeLeafs.filter(t => WEIGHT_RE.test(t));
 
-    // Split afterLeafs into cards at each "изм/доб DATE" boundary
     const cards = [];
     let cur = [];
     for (const t of afterLeafs) {
@@ -440,12 +438,10 @@ async function extractItemsDom(page) {
           from = merged[1].trim();
           time = dateLine.substring(merged[1].length).trim();
         } else {
-          // from city = last Cyrillic word before date
           const before = card.slice(0, dateIdx).filter(l => CITY_RE.test(l) && !TRUCK_KW.test(l));
           from = before[before.length - 1] || "";
           time = dateLine;
         }
-        // to city = first Cyrillic word after date not equal to from
         for (let j = dateIdx + 1; j < card.length; j++) {
           const l = card[j];
           if (CITY_RE.test(l) && !PRICE_KW.test(l) && !TRUCK_KW.test(l) && l !== from) {
@@ -476,14 +472,9 @@ async function extractItemsDom(page) {
     };
   });
 
-  console.log(`[ATISU] DOM card-parse: ${result.items?.length} items, cards=${result.debug?.cards}`);
-  console.log(`[ATISU] foundEl: "${result.debug?.foundText}"`);
-  console.log(`[ATISU] afterLeafs[0..30]:`, JSON.stringify(result.debug?.afterSample));
-  if (result.debug?.cards > 0) {
-    console.log(`[ATISU] card[0]:`, JSON.stringify(result.debug?.card0));
-  }
-  if (result.items?.length === 0) {
-    console.log(`[ATISU] preWeights:`, JSON.stringify(result.debug?.preWeights));
+  console.log(`[ATISU] DOM fallback: ${result.items?.length} items, cards=${result.debug?.cards}`);
+  if (result.debug?.afterSample?.length) {
+    console.log(`[ATISU] afterLeafs sample:`, JSON.stringify(result.debug.afterSample));
   }
   return result.items || [];
 }
