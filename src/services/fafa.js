@@ -2,6 +2,7 @@ import { chromium } from "playwright";
 import { loadBotSetting, saveBotSetting } from "./supabase.js";
 import { scrapeAtisu } from "./atisu.js";
 import { delay, rand } from "../utils/timing.js";
+import { trackEvent } from "./controlTower.js";
 
 const FAFA_URL = "https://fa-fa.kz";
 const SEARCH_URL = `${FAFA_URL}/search_load/`;
@@ -67,7 +68,7 @@ export async function startMonitoring(chatId) {
   if (u.isRunning) return;
   u.isRunning = true;
   u.seenKeys.clear();
-  u.lastNoResultsAt = Date.now(); // первый hourly-сигнал придёт через час
+  u.lastNoResultsAt = Date.now();
   console.log(`[FAFA] monitoring started for ${chatId}`);
   await tick(chatId);
 }
@@ -89,6 +90,21 @@ export async function runOnce(chatId) {
     console.log(`[FAFA] one-time: fetched ${items.length} items`);
     const matched = items.filter(item => matchesFilters(item, u.filters));
     console.log(`[FAFA] one-time: matched ${matched.length} items`);
+
+    // [CT] track each found order
+    for (const item of matched) {
+      trackEvent("order_found", {
+        chatId,
+        from: item.from,
+        to: item.to,
+        cargo: item.cargo,
+        truck_type: item.truck_type,
+        price: item.price,
+        source: item.source || "search",
+        isMonitor: false,
+      });
+    }
+
     return matched;
   } catch (err) {
     console.error("[FAFA] runOnce error:", err.message);
@@ -99,7 +115,7 @@ export async function runOnce(chatId) {
 // ─── Filtering ────────────────────────────────────────────────────────────────
 
 const COUNTRY_ALIASES = {
-  "россия": "RU", "казахстан": "KZ", "беларусь": "BY", "беларуссия": "BY",
+  "россия": "RU", "казахстан": "KZ", "беларусь": "BY", "беларусия": "BY",
   "узбекистан": "UZ", "кыргызстан": "KG", "киргизия": "KG",
   "таджикистан": "TJ", "туркменистан": "TM", "азербайджан": "AZ",
   "грузия": "GE", "армения": "AM", "китай": "CN",
@@ -111,13 +127,11 @@ function matchesFilters(item, filters) {
     const val = (field || "").toLowerCase();
     const flt = filterVal.toLowerCase();
 
-    // Full match
     if (val.includes(flt)) return true;
 
-    // Handle "City, Country" format — try city part and country part separately
     const commaIdx = flt.indexOf(",");
     const cityPart    = commaIdx >= 0 ? flt.substring(0, commaIdx).trim() : flt;
-    const countryPart = commaIdx >= 0 ? flt.substring(commaIdx + 1).trim() : flt;
+    const countryPart = commaIdx >= 0 ? flt.substring(commaIdx + 1).trim()  : flt;
 
     if (cityPart && val.includes(cityPart)) return true;
 
@@ -161,8 +175,22 @@ async function tick(chatId) {
     }
 
     if (matched.length > 0) {
-      for (const item of matched) await notify(item, chatId, true);
-      u.lastNoResultsAt = Date.now(); // сбрасываем счётчик — были новые результаты
+      for (const item of matched) {
+        await notify(item, chatId, true);
+
+        // [CT] track each new cargo found during monitoring
+        trackEvent("order_found", {
+          chatId,
+          from: item.from,
+          to: item.to,
+          cargo: item.cargo,
+          truck_type: item.truck_type,
+          price: item.price,
+          source: item.source || "monitor",
+          isMonitor: true,
+        });
+      }
+      u.lastNoResultsAt = Date.now();
       console.log(`[FAFA] sent ${matched.length} notifications to ${chatId}`);
     } else if (Date.now() - u.lastNoResultsAt >= NO_RESULTS_NOTIFY_MS) {
       u.lastNoResultsAt = Date.now();
@@ -186,7 +214,7 @@ async function notify(item, chatId, isNew = false) {
 
 export function buildMessage(item, opts = {}) {
   const site = item.source === "atisu" ? "ATI.SU" : "FA-FA.KZ";
-  const header = opts.isNew ? `🆕 Новое направление (${site})` : `🚛 Заявка ${site}`;
+  const header = opts.isNew ? `🆕 Новое направление (\n\t${site})` : ` —🚛 Заявка ${site}`;
   const distPart = item.distance ? ` (${item.distance})` : "";
   return [
     header,
@@ -246,11 +274,9 @@ async function scrapeFafa(filters) {
     const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
     if (!hasAuth) await doLogin(page);
 
-    // Navigate to search page
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
     await rand(1500, 2000);
 
-    // Fill search form with filters (site-side filtering)
     await fillSearchForm(page, filters);
 
     await rand(2000, 3000);
@@ -311,11 +337,9 @@ async function fillSearchForm(page, filters) {
 
     const picked = visibleAv1.text;
 
-    // Try Playwright native click first (triggers site's JS event handlers)
     try {
       await page.locator("div.av1").filter({ hasText: picked.slice(0, 10) }).first().click({ timeout: 3000 });
     } catch (_) {
-      // Fallback: MouseEvent dispatch
       await page.evaluate(() => {
         const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
         if (div) {
@@ -328,14 +352,12 @@ async function fillSearchForm(page, filters) {
 
     await rand(500, 700);
 
-    // If the city hidden field was NOT set by the click, extract ID from onclick and set manually
     const fieldName = inputId === "search1" ? "City[1]" : "city_end";
     const hiddenAfter = await page.evaluate(() =>
       Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, id: el.id, t: el.type, v: el.value }))
     );
     const citySet = hiddenAfter.some(f => f.n === fieldName && f.v);
     if (!citySet) {
-      // Many autocompletes store the city ID in onclick="setCity(123,'Name')" or data-id="123"
       const onclickAttr = visibleAv1.attrs.match(/onclick=([^;]+)/)?.[1] || "";
       const dataIdMatch = visibleAv1.attrs.match(/data-id=(\d+)/);
       const onclickIdMatch = onclickAttr.match(/\d+/);
@@ -362,13 +384,11 @@ async function fillSearchForm(page, filters) {
     return picked;
   };
 
-  // FA-FA autocomplete expects just the city/country name without ", Country" suffix
   const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
   const cityTo   = filters.to   ? filters.to.split(",")[0].trim()   : null;
   if (cityFrom) await typeAndPickSuggestion("search1",  cityFrom);
   if (cityTo)   await typeAndPickSuggestion("search10", cityTo);
 
-  // Truck type select
   if (filters.truck_type) {
     await page.evaluate((t) => {
       const sel = document.querySelector("select[name='car_type'], select");
@@ -378,7 +398,6 @@ async function fillSearchForm(page, filters) {
     }, filters.truck_type).catch(() => {});
   }
 
-  // Submit — use load_search button (search for cargo, not trucks)
   await page.evaluate(() => {
     const btn = document.querySelector("input[name='load_search']");
     if (btn) btn.click();
@@ -440,8 +459,8 @@ async function doLogin(page) {
 
 async function extractItems(page) {
   return page.evaluate(() => {
-    const SEPS = ["→", "—", "–"];
-    const JUNK = /выход|кабинет|справка|telegram|copyright|реклам|отмеченн|главная|мои\s*груз|мои\s*машин|найти\s*груз|найти\s*машин/i;
+    const SEPS = ["→", "–", "—"];
+    const JUNK = /выход|кабинет|справка|telegram|copyright|реклам|отмечен|главная|мои\s*груз|мои\s*маш|найти\s*груз|найти\s*маш/i;
 
     function splitRoute(txt) {
       for (const sep of SEPS) {
@@ -460,7 +479,6 @@ async function extractItems(page) {
 
     const results = [];
 
-    // Find all <a> tags whose text contains a route separator
     const routeLinks = Array.from(document.querySelectorAll("a")).filter(a => {
       const txt = a.textContent;
       return SEPS.some(s => txt.includes(s));
@@ -472,31 +490,26 @@ async function extractItems(page) {
       if (JUNK.test(route.from) || JUNK.test(route.to)) continue;
       if (route.from.length > 80 || route.to.length > 80) continue;
 
-      // Walk up to the containing <tr>
       let row = link.parentElement;
       while (row && row.tagName !== "TR") row = row.parentElement;
       if (!row) continue;
 
       const cells = Array.from(row.querySelectorAll("td"));
-      // Find the date cell by looking for a dd.mm date pattern (skip checkbox cells)
       const dateCell = cells.find(td => /\d{2}\.\d{2}/.test(td.innerText || ""));
       const time = dateCell?.innerText?.trim().split("\n")[0] || "";
 
-      // Truck type: use innerText so <br> tags become newlines
       let trCell = link.parentElement;
       while (trCell && trCell.tagName !== "TD") trCell = trCell.parentElement;
       const cellLines = (trCell?.innerText || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
-      const truck_type = cellLines.find(l => /тент|рефр|изот|борт|конт|цист|любая|открыт/i.test(l)) || cellLines[1] || "";
+      const truck_type = cellLines.find(l => /тент|рефр|изот|борт|Шонт|цист|гюль|отк/i.test(l)) || cellLines[1] || "";
 
-      // Price: look in dateCell lines for price pattern
       const dateCellLines = (dateCell?.innerText || "").trim().split("\n").map(s => s.trim()).filter(Boolean);
-      const price = dateCellLines.find(l => /руб\.|тнг\.|нал|карту/.test(l)) || "";
+      const price = dateCellLines.find(l => /руб|тенге|карт|нал/i.test(l)) || "";
 
-      // Weight and cargo — use innerText to preserve line breaks
       let weight = "", cargo = "";
       for (const td of cells) {
         const txt = td.innerText || "";
-        if (/\d+\s*т[^а-яa-z]/.test(txt) || /\d+\s*м[³3]/.test(txt)) {
+        if (/\d+\s*т[^а-я]/i.test(txt) || /\d+\s*м[³3]/.test(txt)) {
           const lines = txt.trim().split("\n").map(s => s.trim()).filter(s => s && s.length < 60);
           weight = lines[0] || "";
           cargo = lines.find(l => l !== weight && !/^\d/.test(l) && !JUNK.test(l)) || "";
@@ -507,10 +520,9 @@ async function extractItems(page) {
       results.push({ from: route.from, to: route.to, distance: route.distance || "", cargo, weight, truck_type, time, price });
     }
 
-    // Deduplicate by from+to+time+truck_type
     const seen = new Set();
     return results.filter(it => {
-      const k = `${it.from}|${it.to}|${it.time}|${it.truck_type}`.toLowerCase().replace(/\s/g, "");
+      const k = `${it.from}|${it.to}|${it.time}|${it.truck_type}`.toLowerCase().replace(/\s /g, "");
       if (seen.has(k)) return false;
       seen.add(k);
       return true;
