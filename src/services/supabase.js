@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { trackEvent } from "./controlTower.js";
 
 export const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
@@ -54,6 +55,17 @@ export async function saveLead(leadData) {
         .select()
         .single();
       if (error) throw new Error(`Supabase update failed: ${error.message}`);
+
+      // [CT] existing lead updated — still counts as engagement
+      trackEvent("booking_created", {
+        leadId: data.id,
+        from_city: leadData.from,
+        to_city: leadData.to,
+        cargo: leadData.cargo,
+        chatId: leadData.client_chat_id,
+        updated: true,
+      });
+
       return data;
     }
   }
@@ -65,6 +77,18 @@ export async function saveLead(leadData) {
     .single();
 
   if (error) throw new Error(`Supabase insert failed: ${error.message}`);
+
+  // [CT] new lead created
+  trackEvent("booking_created", {
+    leadId: data.id,
+    from_city: leadData.from,
+    to_city: leadData.to,
+    cargo: leadData.cargo,
+    transport_type: leadData.transport_type,
+    chatId: leadData.client_chat_id,
+    updated: false,
+  });
+
   return data;
 }
 
