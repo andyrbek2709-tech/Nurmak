@@ -61,10 +61,17 @@ async function restoreMonitoring() {
     const list = JSON.parse(raw);
     if (!list.length) return;
     console.log(`[FAFA] restoring monitoring for ${list.length} users:`, list);
-    for (const chatId of list) {
-      startMonitoring(chatId).catch(e =>
-        console.error(`[FAFA] restore error for ${chatId}:`, e.message)
-      );
+    // Stagger first ticks to avoid concurrent Chromium launches at boot (OOM risk on Railway)
+    for (let i = 0; i < list.length; i++) {
+      const chatId = String(list[i]);
+      const u = await getOrInitUser(chatId);
+      if (u.isRunning) continue;
+      u.isRunning = true;
+      u.seenKeys.clear();
+      u.lastNoResultsAt = Date.now();
+      const delayMs = 30000 + i * 60000;
+      u.monitorTimer = setTimeout(() => tick(chatId), delayMs);
+      console.log(`[FAFA] monitoring restored for ${chatId} (first check in ${delayMs / 1000}s)`);
     }
   } catch (err) {
     console.error("[FAFA] restoreMonitoring error:", err.message);
@@ -309,7 +316,21 @@ export function buildMessage(item, opts = {}) {
 
 // ─── Scraper ──────────────────────────────────────────────────────────────────
 
+// Global mutex: only one scrape at a time across all users (Chromium is RAM-heavy)
+let scrapeChain = Promise.resolve();
 async function scrape(fafaFilters, atisuFilters) {
+  const prev = scrapeChain;
+  let release;
+  scrapeChain = new Promise(r => { release = r; });
+  try {
+    await prev.catch(() => {});
+    return await scrapeInternal(fafaFilters, atisuFilters);
+  } finally {
+    release();
+  }
+}
+
+async function scrapeInternal(fafaFilters, atisuFilters) {
   const items = [];
 
   // Run sequentially to avoid launching two Chromium instances simultaneously (OOM risk)
