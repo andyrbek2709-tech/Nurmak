@@ -368,23 +368,39 @@ async function scrapeFafa(filters) {
     });
     const page = await context.newPage();
 
-    await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await rand(1500, 2500);
-
-    const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
-    if (!hasAuth) await doLogin(page);
+    // Go directly to search page — FA-FA.KZ allows anonymous search
+    // Login only if credentials provided; failure is non-fatal (anonymous search still works)
+    const faLogin = process.env.FAFA_LOGIN;
+    const faPass  = process.env.FAFA_PASSWORD;
+    if (faLogin && faPass) {
+      await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await rand(1000, 1500);
+      const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
+      console.log(`[FAFA] auth check: ${hasAuth ? "already logged in" : "not logged in, trying login"}`);
+      if (!hasAuth) {
+        await doLogin(page).catch(err =>
+          console.warn(`[FAFA] login failed, proceeding anonymously: ${err.message}`)
+        );
+      }
+    } else {
+      console.log("[FAFA] no credentials — anonymous search");
+    }
 
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
     await rand(1500, 2000);
+    console.log(`[FAFA] search page loaded: ${page.url()}`);
 
     await fillSearchForm(page, filters);
 
-    await rand(2000, 3000);
-    console.log(`[FAFA] scraping URL: ${page.url()}, title: ${await page.title()}`);
+    await rand(1000, 1500);
+    const finalUrl = page.url();
+    const finalTitle = await page.title();
+    console.log(`[FAFA] after search: URL=${finalUrl}, title="${finalTitle}"`);
 
     const items = await extractItems(page);
-    items.slice(0, 3).forEach((it, i) =>
-      console.log(`[FAFA] item[${i}]: from="${it.from}" to="${it.to}" cargo="${it.cargo}" truck="${it.truck_type}"`)
+    console.log(`[FAFA] extractItems returned ${items.length} items`);
+    items.slice(0, 5).forEach((it, i) =>
+      console.log(`[FAFA] item[${i}]: from="${it.from}" to="${it.to}" truck="${it.truck_type}" weight="${it.weight}"`)
     );
     return items;
   } finally {
@@ -516,15 +532,29 @@ async function fillSearchForm(page, filters) {
     }, filters.truck_type).catch(() => {});
   }
 
-  await page.evaluate(() => {
-    const btn = document.querySelector("input[name='load_search']");
-    if (btn) btn.click();
+  // Submit: try multiple selectors, then keyboard Enter as fallback
+  const submitted = await page.evaluate(() => {
+    const candidates = [
+      document.querySelector("input[name='load_search']"),
+      document.querySelector("button[type='submit']"),
+      document.querySelector("input[type='submit']"),
+      document.querySelector(".search-btn, .btn-search, .submit"),
+    ].filter(Boolean);
+    if (candidates.length > 0) { candidates[0].click(); return candidates[0].outerHTML.slice(0, 80); }
+    return null;
   });
-  console.log("[FAFA] search submitted");
+  if (submitted) {
+    console.log(`[FAFA] submit via button: ${submitted}`);
+  } else {
+    // Fallback: press Enter on the from-field
+    console.log("[FAFA] no submit button found, trying Enter key");
+    const inp = page.locator("#search1");
+    await inp.press("Enter").catch(() => {});
+  }
 
-  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
   await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  try { await page.waitForSelector("tr td a", { timeout: 10000 }); } catch (_) {}
+  try { await page.waitForSelector("tr td a", { timeout: 8000 }); } catch (_) {}
   await rand(800, 1200);
   console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
