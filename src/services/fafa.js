@@ -21,13 +21,21 @@ function emptyFilters() {
 async function getOrInitUser(chatId) {
   const key = String(chatId);
   if (!users.has(key)) {
-    const state = { filters: emptyFilters(), seenKeys: new Set(), isRunning: false, monitorTimer: null, lastNoResultsAt: 0 };
+    const state = { filters: { fafa: emptyFilters(), atisu: emptyFilters() }, seenKeys: new Set(), isRunning: false, monitorTimer: null, lastNoResultsAt: 0 };
     users.set(key, state);
     try {
       const val = await loadBotSetting(`filters_${key}`);
       if (val) {
         const saved = JSON.parse(val);
-        Object.assign(state.filters, saved);
+        // Migration: old format had from/to at top level
+        if ("from" in saved || "to" in saved) {
+          state.filters = { fafa: Object.assign(emptyFilters(), saved), atisu: emptyFilters() };
+        } else {
+          state.filters = {
+            fafa:  Object.assign(emptyFilters(), saved.fafa  || {}),
+            atisu: Object.assign(emptyFilters(), saved.atisu || {}),
+          };
+        }
         console.log(`[FAFA] filters loaded for ${key}:`, JSON.stringify(state.filters));
       }
     } catch (_) {}
@@ -49,17 +57,17 @@ export async function getFilters(chatId) {
   return { ...u.filters };
 }
 
-export async function setFilter(chatId, key, value) {
+export async function setFilter(chatId, site, field, value) {
   const u = await getOrInitUser(chatId);
-  if (key in u.filters) {
-    u.filters[key] = value?.trim() || null;
+  if ((site === "fafa" || site === "atisu") && field in u.filters[site]) {
+    u.filters[site][field] = value?.trim() || null;
     saveBotSetting(`filters_${chatId}`, JSON.stringify(u.filters)).catch(() => {});
   }
 }
 
 export async function clearFilters(chatId) {
   const u = await getOrInitUser(chatId);
-  u.filters = emptyFilters();
+  u.filters = { fafa: emptyFilters(), atisu: emptyFilters() };
   saveBotSetting(`filters_${chatId}`, JSON.stringify(u.filters)).catch(() => {});
 }
 
@@ -86,9 +94,12 @@ export async function runOnce(chatId) {
   const u = await getOrInitUser(chatId);
   console.log(`[FAFA] running one-time search for ${chatId}...`);
   try {
-    const items = await scrape(u.filters);
+    const items = await scrape(u.filters.fafa, u.filters.atisu);
     console.log(`[FAFA] one-time: fetched ${items.length} items`);
-    const matched = items.filter(item => matchesFilters(item, u.filters));
+    const matched = items.filter(item => {
+      const f = item.source === "fafa" ? u.filters.fafa : u.filters.atisu;
+      return matchesFilters(item, f);
+    });
     console.log(`[FAFA] one-time: matched ${matched.length} items`);
 
     // [CT] track each found order
@@ -159,14 +170,17 @@ async function tick(chatId) {
   const u = users.get(String(chatId));
   if (!u || !u.isRunning) return;
   try {
-    const items = await scrape(u.filters);
+    const items = await scrape(u.filters.fafa, u.filters.atisu);
     console.log(`[FAFA] fetched ${items.length} items for ${chatId}`);
 
     const freshWithKeys = items
       .map(i => [i, makeKey(i)])
       .filter(([, k]) => k.length > 3 && !u.seenKeys.has(k));
     const matched = freshWithKeys
-      .filter(([item]) => matchesFilters(item, u.filters))
+      .filter(([item]) => {
+        const f = item.source === "fafa" ? u.filters.fafa : u.filters.atisu;
+        return matchesFilters(item, f);
+      })
       .map(([item]) => item);
 
     for (const [, k] of freshWithKeys) {
@@ -230,12 +244,12 @@ export function buildMessage(item, opts = {}) {
 
 // ─── Scraper ──────────────────────────────────────────────────────────────────
 
-async function scrape(filters) {
+async function scrape(fafaFilters, atisuFilters) {
   const items = [];
 
   // Run sequentially to avoid launching two Chromium instances simultaneously (OOM risk)
   try {
-    const fafaItems = await scrapeFafa(filters);
+    const fafaItems = await scrapeFafa(fafaFilters);
     items.push(...fafaItems.map(i => ({ ...i, source: "fafa" })));
   } catch (err) {
     console.error("[SCRAPE] fafa error:", err.message);
@@ -245,7 +259,7 @@ async function scrape(filters) {
     const timeout = new Promise((_, reject) =>
       setTimeout(() => reject(new Error("scrapeAtisu timeout 120s")), 120000)
     );
-    const atisuItems = await Promise.race([scrapeAtisu(filters), timeout]);
+    const atisuItems = await Promise.race([scrapeAtisu(atisuFilters), timeout]);
     items.push(...atisuItems.map(i => ({ ...i, source: "atisu" })));
   } catch (err) {
     console.error("[SCRAPE] atisu error:", err.message);

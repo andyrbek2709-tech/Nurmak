@@ -93,6 +93,32 @@ async function handleCallback(ctx) {
   try {
     const msgId = ctx.callbackQuery.message.message_id;
 
+    if (action === "fsite") {
+      // id = "fafa" or "atisu"
+      const site = id;
+      await ctx.answerCbQuery();
+      const f = await getFilters(chatId);
+      await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
+      return;
+    }
+
+    if (action === "ftrk") {
+      // id = "fafa:тент" or "atisu:clear"
+      const colonIdx = id.indexOf(":");
+      const site  = id.substring(0, colonIdx);
+      const value = id.substring(colonIdx + 1);
+      if (value === "clear") {
+        await setFilter(chatId, site, "truck_type", null);
+        await ctx.answerCbQuery("Фильтр убран");
+      } else {
+        await setFilter(chatId, site, "truck_type", value);
+        await ctx.answerCbQuery(`✅ ${value}`);
+      }
+      const f = await getFilters(chatId);
+      await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
+      return;
+    }
+
     if (action === "fset") {
       const field = id;
       if (field === "clear") {
@@ -131,31 +157,69 @@ async function handleCallback(ctx) {
         const nowActive = await isMonitoringActive(chatId);
         await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(nowActive) }).catch(() => {});
       } else {
-        // from / to → show country selection keyboard
-        const labels = { from: "Откуда", to: "Куда" };
-        await ctx.answerCbQuery();
-        await ctx.reply(`${labels[field] || field}: выберите страну:`, { reply_markup: buildCountryKeyboard(field) });
+        // Site-specific: id = "fafa:from", "fafa:truck_type", "fafa:back", "fafa:clear_site" etc.
+        const colonIdx = field.indexOf(":");
+        if (colonIdx < 0) {
+          await ctx.answerCbQuery("Запустите /filter снова");
+          return;
+        }
+        const site     = field.substring(0, colonIdx);
+        const subfield = field.substring(colonIdx + 1);
+
+        if (subfield === "back") {
+          await ctx.answerCbQuery();
+          const isActive = await isMonitoringActive(chatId);
+          await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) }).catch(() => {});
+        } else if (subfield === "clear_site") {
+          for (const f of ["from", "to", "cargo", "truck_type"]) {
+            await setFilter(chatId, site, f, null);
+          }
+          await ctx.answerCbQuery("Сброшено");
+          const f = await getFilters(chatId);
+          await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
+        } else if (subfield === "truck_type") {
+          await ctx.answerCbQuery();
+          await ctx.editMessageText("Выберите тип транспорта:", { reply_markup: buildTruckTypeKeyboard(site) }).catch(() => {});
+        } else if (subfield === "cargo") {
+          filterPending.set(chatId, { site, field: "cargo", country: null });
+          await ctx.answerCbQuery();
+          await ctx.reply("Введите тип груза (например: «зерно», «трубы») или «-» чтобы убрать:");
+        } else {
+          // from / to → show country keyboard (edit current message)
+          const fieldLabels = { from: "Откуда", to: "Куда" };
+          await ctx.answerCbQuery();
+          await ctx.editMessageText(
+            `${fieldLabels[subfield] || subfield}: выберите страну:`,
+            { reply_markup: buildCountryKeyboard(site, subfield) }
+          ).catch(() => {});
+        }
       }
       return;
     }
 
     if (action === "fsel") {
-      // id = "from:Казахстан" or "to:clear" etc.
-      const colonIdx = id.indexOf(":");
-      const field   = id.substring(0, colonIdx);
-      const country = id.substring(colonIdx + 1);
+      // id = "fafa:from:Казахстан" or "atisu:to:clear" etc.
+      const parts   = id.split(":");
+      // Guard: old format was fsel:from:Country (no site prefix)
+      if (parts[0] === "from" || parts[0] === "to") {
+        await ctx.answerCbQuery("Запустите /filter снова");
+        return;
+      }
+      const site    = parts[0];
+      const field   = parts[1];
+      const country = parts.slice(2).join(":");
       if (country === "clear") {
-        await setFilter(chatId, field, null);
+        await setFilter(chatId, site, field, null);
         await ctx.answerCbQuery("Фильтр убран");
-        const isActive = await isMonitoringActive(chatId);
-        await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) }).catch(() => {});
+        const f = await getFilters(chatId);
+        await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
       } else if (country === "manual") {
-        filterPending.set(chatId, { field, country: null });
+        filterPending.set(chatId, { site, field, country: null });
         await ctx.answerCbQuery();
-        const labels = { from: "Откуда", to: "Куда" };
-        await ctx.reply(`Введите «${labels[field]}» вручную (например: «Алматы, Казахстан» или «-» чтобы убрать):`);
+        const fieldLabels = { from: "Откуда", to: "Куда" };
+        await ctx.reply(`Введите «${fieldLabels[field] || field}» вручную (например: «Алматы, Казахстан» или «-» чтобы убрать):`);
       } else {
-        filterPending.set(chatId, { field, country });
+        filterPending.set(chatId, { site, field, country });
         await ctx.answerCbQuery();
         const flag = { Казахстан: "🇰🇿", Россия: "🇷🇺", Беларусь: "🇧🇾", Узбекистан: "🇺🇿" }[country] || "🌍";
         await ctx.reply(
@@ -234,11 +298,22 @@ const filterPending = new Map();
 async function buildFilterText(chatId) {
   const f = await getFilters(chatId);
   const isActive = await isMonitoringActive(chatId);
+  const ff = f.fafa;
+  const fa = f.atisu;
   return [
-    `⚙️ Фильтры поиска (FA-FA.KZ + ATI.SU):`,
+    `⚙️ Фильтры поиска:`,
     ``,
-    `🗺 Откуда: ${f.from || "любой"}`,
-    `🗺 Куда: ${f.to || "любой"}`,
+    `🟠 FA-FA.KZ:`,
+    `  Откуда: ${ff.from || "любой"}`,
+    `  Куда: ${ff.to || "любой"}`,
+    `  Транспорт: ${ff.truck_type || "любой"}`,
+    `  Груз: ${ff.cargo || "любой"}`,
+    ``,
+    `🔵 ATI.SU:`,
+    `  Откуда: ${fa.from || "любой"}`,
+    `  Куда: ${fa.to || "любой"}`,
+    `  Транспорт: ${fa.truck_type || "любой"}`,
+    `  Груз: ${fa.cargo || "любой"}`,
     ``,
     isActive ? `🟢 Мониторинг активен` : `⚫️ Мониторинг выключен`,
   ].join("\n");
@@ -248,8 +323,8 @@ function buildFilterKeyboard(isActive = false) {
   return {
     inline_keyboard: [
       [
-        { text: "✏️ Откуда", callback_data: "fset:from" },
-        { text: "✏️ Куда",   callback_data: "fset:to"   },
+        { text: "🟠 FA-FA.KZ", callback_data: "fsite:fafa"  },
+        { text: "🔵 ATI.SU",   callback_data: "fsite:atisu" },
       ],
       [
         { text: "🔍 Найти сейчас", callback_data: "fset:search" },
@@ -262,8 +337,66 @@ function buildFilterKeyboard(isActive = false) {
   };
 }
 
-function buildCountryKeyboard(field) {
-  const p = `fsel:${field}`;
+function buildSiteFilterText(site, siteFilters) {
+  const name = site === "fafa" ? "🟠 FA-FA.KZ" : "🔵 ATI.SU";
+  return [
+    `${name} — настройки фильтра:`,
+    ``,
+    `  Откуда: ${siteFilters.from || "любой"}`,
+    `  Куда: ${siteFilters.to || "любой"}`,
+    `  Транспорт: ${siteFilters.truck_type || "любой"}`,
+    `  Груз: ${siteFilters.cargo || "любой"}`,
+  ].join("\n");
+}
+
+function buildSiteKeyboard(site) {
+  const p = `fset:${site}`;
+  return {
+    inline_keyboard: [
+      [
+        { text: "✏️ Откуда",    callback_data: `${p}:from`       },
+        { text: "✏️ Куда",      callback_data: `${p}:to`         },
+      ],
+      [
+        { text: "🚛 Транспорт", callback_data: `${p}:truck_type` },
+        { text: "📦 Груз",      callback_data: `${p}:cargo`      },
+      ],
+      [
+        { text: "❌ Сбросить этот сайт", callback_data: `${p}:clear_site` },
+      ],
+      [
+        { text: "◀️ Назад",     callback_data: `${p}:back`       },
+      ],
+    ],
+  };
+}
+
+function buildTruckTypeKeyboard(site) {
+  const p = `ftrk:${site}`;
+  return {
+    inline_keyboard: [
+      [
+        { text: "тент",  callback_data: `${p}:тент`  },
+        { text: "рефр",  callback_data: `${p}:рефр`  },
+      ],
+      [
+        { text: "борт",  callback_data: `${p}:борт`  },
+        { text: "изот",  callback_data: `${p}:изот`  },
+      ],
+      [
+        { text: "конт",  callback_data: `${p}:конт`  },
+        { text: "цист",  callback_data: `${p}:цист`  },
+      ],
+      [
+        { text: "✅ любая",   callback_data: `${p}:любая` },
+        { text: "❌ Убрать",  callback_data: `${p}:clear` },
+      ],
+    ],
+  };
+}
+
+function buildCountryKeyboard(site, field) {
+  const p = `fsel:${site}:${field}`;
   return {
     inline_keyboard: [
       [
@@ -351,12 +484,12 @@ export async function handleText(ctx) {
   const userMessage = ctx.message.text?.trim();
   if (!userMessage) return;
 
-  const labels = { from: "Откуда", to: "Куда" };
+  const labels = { from: "Откуда", to: "Куда", cargo: "Груз", truck_type: "Транспорт" };
 
   const pending = filterPending.get(chatId);
   if (pending) {
     filterPending.delete(chatId);
-    const { field, country } = pending;
+    const { site, field, country } = pending;
     let value;
     if (country) {
       // country→city flow: "-" means search whole country
@@ -365,11 +498,11 @@ export async function handleText(ctx) {
       // manual entry flow: "-" clears the filter
       value = userMessage === "-" ? null : userMessage;
     }
-    await setFilter(chatId, field, value);
-    const isActive = await isMonitoringActive(chatId);
+    await setFilter(chatId, site, field, value);
+    const f = await getFilters(chatId);
     await ctx.reply(
-      `${value ? `✅ ${labels[field]}: ${value}` : `✅ Фильтр «${labels[field]}» убран`}\n\n${await buildFilterText(chatId)}`,
-      { reply_markup: buildFilterKeyboard(isActive) }
+      `${value ? `✅ ${labels[field] || field}: ${value}` : `✅ Фильтр «${labels[field] || field}» убран`}\n\n${buildSiteFilterText(site, f[site])}`,
+      { reply_markup: buildSiteKeyboard(site) }
     );
     return;
   }
