@@ -376,39 +376,73 @@ async function _scrapeFafa(filters) {
     });
     const page = await context.newPage();
 
-    // Go directly to search page — FA-FA.KZ allows anonymous search
-    // Login only if credentials provided; failure is non-fatal (anonymous search still works)
+    // Optional login (non-fatal — FA-FA.KZ returns results anonymously too)
     const faLogin = process.env.FAFA_LOGIN;
     const faPass  = process.env.FAFA_PASSWORD;
     if (faLogin && faPass) {
       await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await rand(1000, 1500);
+      await rand(500, 1000);
       const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
-      console.log(`[FAFA] auth check: ${hasAuth ? "already logged in" : "not logged in, trying login"}`);
+      console.log(`[FAFA] auth: ${hasAuth ? "logged in" : "not logged in, trying login"}`);
       if (!hasAuth) {
         await doLogin(page).catch(err =>
-          console.warn(`[FAFA] login failed, proceeding anonymously: ${err.message}`)
+          console.warn(`[FAFA] login failed, continuing anonymously: ${err.message}`)
         );
       }
-    } else {
-      console.log("[FAFA] no credentials — anonymous search");
     }
 
+    // Load search page once to establish session cookies
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
-    await rand(1500, 2000);
-    console.log(`[FAFA] search page loaded: ${page.url()}`);
+    await rand(300, 600);
+    console.log(`[FAFA] session ready, posting search: City[1]="${filters.from || ""}" City[2]="${filters.to || ""}"`);
 
-    await fillSearchForm(page, filters);
+    // Direct POST — no autocomplete needed.
+    // FA-FA.KZ form accepts plain text in City[1]/City[2]; server geocodes on backend.
+    // Form structure per DevTools inspection of fa-fa.kz/search_load/
+    const formData = {
+      type_add:   "load",
+      "City[1]":  filters.from || "",
+      "Rad[1]":   "",
+      "Tmidl[2]": "1",
+      "City[2]":  filters.to   || "",
+      "Rad[2]":   "",
+      "Tmidl[3]": "1", "City[3]": "", "Rad[3]": "",
+      "Tmidl[4]": "1", "City[4]": "", "Rad[4]": "",
+      "Tmidl[5]": "1", "City[5]": "", "Rad[5]": "",
+      "Tmidl[6]": "1", "City[6]": "", "Rad[6]": "",
+      "Tmidl[7]": "1", "City[7]": "", "Rad[7]": "",
+      "Tmidl[8]": "1", "City[8]": "", "Rad[8]": "",
+      city_end:   "",
+      rad_end:    "",
+      type21:     "0",
+      w_ot:       "0",
+      w_do:       "22",
+      v_ot:       "0",
+      v_do:       "130",
+      dat1:       "0",
+      dat2:       "7",
+      type_closed: "0",
+      load_search: "",
+    };
 
-    await rand(1000, 1500);
-    const finalUrl = page.url();
-    const finalTitle = await page.title();
-    console.log(`[FAFA] after search: URL=${finalUrl}, title="${finalTitle}"`);
+    // POST the search form, follow redirect to ?sid=XXXXX
+    const resp = await page.request.post(`${SEARCH_URL}?blank=1`, { form: formData });
+    const resultUrl = resp.url();
+    console.log(`[FAFA] POST response URL: ${resultUrl}`);
+
+    if (!resultUrl.includes("?sid=")) {
+      console.log("[FAFA] WARNING: no ?sid= in result URL — search may have failed");
+      return [];
+    }
+
+    // Navigate browser to the result page so page.evaluate works
+    await page.goto(resultUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
 
     const items = await extractItems(page);
-    console.log(`[FAFA] extractItems returned ${items.length} items`);
+    console.log(`[FAFA] extractItems: ${items.length} items`);
     items.slice(0, 5).forEach((it, i) =>
-      console.log(`[FAFA] item[${i}]: from="${it.from}" to="${it.to}" truck="${it.truck_type}" weight="${it.weight}"`)
+      console.log(`[FAFA] item[${i}]: from="${it.from}" to="${it.to}" truck="${it.truck_type}"`)
     );
     return items;
   } finally {
