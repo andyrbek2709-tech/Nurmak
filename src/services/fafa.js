@@ -15,7 +15,7 @@ let _bot = null;
 const users = new Map();
 
 function emptyFilters() {
-  return { from: null, to: null, cargo: null, truck_type: null };
+  return { from: null, to: null, truck_type: null, weight: null, volume: null };
 }
 
 async function getOrInitUser(chatId) {
@@ -132,6 +132,21 @@ const COUNTRY_ALIASES = {
   "грузия": "GE", "армения": "AM", "китай": "CN",
 };
 
+function parseRange(str) {
+  if (!str) return { min: null, max: null };
+  const dash = str.match(/(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)/);
+  if (dash) return { min: parseFloat(dash[1]), max: parseFloat(dash[2]) };
+  const single = str.match(/(\d+(?:\.\d+)?)/);
+  return single ? { min: parseFloat(single[1]), max: null } : { min: null, max: null };
+}
+
+function parseItemWeight(weightStr) {
+  if (!weightStr) return { tons: null, m3: null };
+  const t = weightStr.match(/(\d+(?:\.\d+)?)\s*т/);
+  const m = weightStr.match(/(\d+(?:\.\d+)?)\s*м/);
+  return { tons: t ? parseFloat(t[1]) : null, m3: m ? parseFloat(m[1]) : null };
+}
+
 function matchesFilters(item, filters) {
   const matches = (field, filterVal) => {
     if (!filterVal) return true;
@@ -154,10 +169,22 @@ function matchesFilters(item, filters) {
   };
   if (!matches(item.from, filters.from)) return false;
   if (!matches(item.to, filters.to)) return false;
-  if (!matches(item.cargo, filters.cargo)) return false;
   if (filters.truck_type) {
     const types = filters.truck_type.split(",").map(t => t.trim()).filter(Boolean);
     if (types.length > 0 && !types.some(t => matches(item.truck_type, t))) return false;
+  }
+  if (filters.weight || filters.volume) {
+    const { tons, m3 } = parseItemWeight(item.weight);
+    if (filters.weight && tons !== null) {
+      const { min, max } = parseRange(filters.weight);
+      if (min !== null && tons < min) return false;
+      if (max !== null && tons > max) return false;
+    }
+    if (filters.volume && m3 !== null) {
+      const { min, max } = parseRange(filters.volume);
+      if (min !== null && m3 < min) return false;
+      if (max !== null && m3 > max) return false;
+    }
   }
   return true;
 }

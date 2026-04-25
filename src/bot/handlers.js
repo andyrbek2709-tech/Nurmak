@@ -204,10 +204,14 @@ async function handleCallback(ctx) {
           const selected = new Set(current ? current.split(",").map(t => t.trim()).filter(Boolean) : []);
           truckPending.set(chatId, { site, selected });
           await ctx.editMessageText("Выберите тип транспорта (можно несколько):", { reply_markup: buildTruckTypeKeyboard(site, selected) }).catch(() => {});
-        } else if (subfield === "cargo") {
-          filterPending.set(chatId, { site, field: "cargo", country: null });
+        } else if (subfield === "weight") {
+          filterPending.set(chatId, { site, field: "weight", country: null });
           await ctx.answerCbQuery();
-          await ctx.reply("Введите тип груза (например: «зерно», «трубы») или «-» чтобы убрать:");
+          await ctx.reply("Укажите тоннаж (т): «10-20» диапазон, «10» минимум, «-» убрать:");
+        } else if (subfield === "volume") {
+          filterPending.set(chatId, { site, field: "volume", country: null });
+          await ctx.answerCbQuery();
+          await ctx.reply("Укажите объём (м³): «5-20» диапазон, «5» минимум, «-» убрать:");
         } else {
           // from / to → show country keyboard (edit current message)
           const fieldLabels = { from: "Откуда", to: "Куда" };
@@ -333,13 +337,15 @@ async function buildFilterText(chatId) {
     `  Откуда: ${ff.from || "любой"}`,
     `  Куда: ${ff.to || "любой"}`,
     `  Транспорт: ${ff.truck_type ? ff.truck_type.split(",").join(", ") : "любой"}`,
-    `  Груз: ${ff.cargo || "любой"}`,
+    `  Тоннаж: ${ff.weight ? ff.weight + " т" : "любой"}`,
+    `  Объём: ${ff.volume ? ff.volume + " м³" : "любой"}`,
     ``,
     `🔵 ATI.SU:`,
     `  Откуда: ${fa.from || "любой"}`,
     `  Куда: ${fa.to || "любой"}`,
     `  Транспорт: ${fa.truck_type ? fa.truck_type.split(",").join(", ") : "любой"}`,
-    `  Груз: ${fa.cargo || "любой"}`,
+    `  Тоннаж: ${fa.weight ? fa.weight + " т" : "любой"}`,
+    `  Объём: ${fa.volume ? fa.volume + " м³" : "любой"}`,
     ``,
     isActive ? `🟢 Мониторинг активен` : `⚫️ Мониторинг выключен`,
   ].join("\n");
@@ -371,7 +377,8 @@ function buildSiteFilterText(site, siteFilters) {
     `  Откуда: ${siteFilters.from || "любой"}`,
     `  Куда: ${siteFilters.to || "любой"}`,
     `  Транспорт: ${siteFilters.truck_type ? siteFilters.truck_type.split(",").join(", ") : "любой"}`,
-    `  Груз: ${siteFilters.cargo || "любой"}`,
+    `  Тоннаж: ${siteFilters.weight ? siteFilters.weight + " т" : "любой"}`,
+    `  Объём: ${siteFilters.volume ? siteFilters.volume + " м³" : "любой"}`,
   ].join("\n");
 }
 
@@ -385,7 +392,10 @@ function buildSiteKeyboard(site) {
       ],
       [
         { text: "🚛 Транспорт", callback_data: `${p}:truck_type` },
-        { text: "📦 Груз",      callback_data: `${p}:cargo`      },
+        { text: "⚖️ Тоннаж",   callback_data: `${p}:weight`     },
+      ],
+      [
+        { text: "📐 Объём, м³", callback_data: `${p}:volume` },
       ],
       [
         { text: "❌ Сбросить этот сайт", callback_data: `${p}:clear_site` },
@@ -504,7 +514,7 @@ export async function handleText(ctx) {
   const userMessage = ctx.message.text?.trim();
   if (!userMessage) return;
 
-  const labels = { from: "Откуда", to: "Куда", cargo: "Груз", truck_type: "Транспорт" };
+  const labels = { from: "Откуда", to: "Куда", truck_type: "Транспорт", weight: "Тоннаж", volume: "Объём" };
 
   const pending = filterPending.get(chatId);
   if (pending) {
