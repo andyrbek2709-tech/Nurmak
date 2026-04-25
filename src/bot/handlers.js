@@ -103,19 +103,39 @@ async function handleCallback(ctx) {
     }
 
     if (action === "ftrk") {
-      // id = "fafa:тент" or "atisu:clear"
-      const colonIdx = id.indexOf(":");
-      const site  = id.substring(0, colonIdx);
-      const value = id.substring(colonIdx + 1);
-      if (value === "clear") {
-        await setFilter(chatId, site, "truck_type", null);
-        await ctx.answerCbQuery("Фильтр убран");
-      } else {
+      // id = "fafa:toggle:тент" | "fafa:done" | "fafa:clear"
+      const parts     = id.split(":");
+      const site      = parts[0];
+      const subaction = parts[1];
+
+      if (subaction === "toggle") {
+        const type    = parts.slice(2).join(":");
+        const pending = truckPending.get(chatId);
+        if (!pending) { await ctx.answerCbQuery("Откройте выбор снова"); return; }
+        if (pending.selected.has(type)) pending.selected.delete(type);
+        else pending.selected.add(type);
+        await ctx.answerCbQuery();
+        await ctx.editMessageText(
+          "Выберите тип транспорта (можно несколько):",
+          { reply_markup: buildTruckTypeKeyboard(site, pending.selected) }
+        ).catch(() => {});
+      } else if (subaction === "done") {
+        const pending = truckPending.get(chatId);
+        truckPending.delete(chatId);
+        const value = pending && pending.selected.size > 0 ? [...pending.selected].join(",") : null;
         await setFilter(chatId, site, "truck_type", value);
-        await ctx.answerCbQuery(`✅ ${value}`);
+        await ctx.answerCbQuery(value ? "✅ Сохранено" : "Фильтр убран");
+        const f = await getFilters(chatId);
+        await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
+      } else if (subaction === "clear") {
+        const pending = truckPending.get(chatId);
+        if (pending) pending.selected.clear();
+        await ctx.answerCbQuery("Сброшено");
+        await ctx.editMessageText(
+          "Выберите тип транспорта (можно несколько):",
+          { reply_markup: buildTruckTypeKeyboard(site, truckPending.get(chatId)?.selected || new Set()) }
+        ).catch(() => {});
       }
-      const f = await getFilters(chatId);
-      await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
       return;
     }
 
@@ -179,7 +199,11 @@ async function handleCallback(ctx) {
           await ctx.editMessageText(buildSiteFilterText(site, f[site]), { reply_markup: buildSiteKeyboard(site) }).catch(() => {});
         } else if (subfield === "truck_type") {
           await ctx.answerCbQuery();
-          await ctx.editMessageText("Выберите тип транспорта:", { reply_markup: buildTruckTypeKeyboard(site) }).catch(() => {});
+          const f = await getFilters(chatId);
+          const current = f[site].truck_type;
+          const selected = new Set(current ? current.split(",").map(t => t.trim()).filter(Boolean) : []);
+          truckPending.set(chatId, { site, selected });
+          await ctx.editMessageText("Выберите тип транспорта (можно несколько):", { reply_markup: buildTruckTypeKeyboard(site, selected) }).catch(() => {});
         } else if (subfield === "cargo") {
           filterPending.set(chatId, { site, field: "cargo", country: null });
           await ctx.answerCbQuery();
@@ -292,8 +316,10 @@ async function handleOwnerToday(ctx) {
 }
 
 // ─── Filter state machine ─────────────────────────────────────────────────────
-// chatId → { field, country|null } — pending text input for filter wizard
+// chatId → { site, field, country|null } — pending text input for filter wizard
 const filterPending = new Map();
+// chatId → { site, selected: Set<string> } — truck type multi-select session
+const truckPending = new Map();
 
 async function buildFilterText(chatId) {
   const f = await getFilters(chatId);
@@ -306,13 +332,13 @@ async function buildFilterText(chatId) {
     `🟠 FA-FA.KZ:`,
     `  Откуда: ${ff.from || "любой"}`,
     `  Куда: ${ff.to || "любой"}`,
-    `  Транспорт: ${ff.truck_type || "любой"}`,
+    `  Транспорт: ${ff.truck_type ? ff.truck_type.split(",").join(", ") : "любой"}`,
     `  Груз: ${ff.cargo || "любой"}`,
     ``,
     `🔵 ATI.SU:`,
     `  Откуда: ${fa.from || "любой"}`,
     `  Куда: ${fa.to || "любой"}`,
-    `  Транспорт: ${fa.truck_type || "любой"}`,
+    `  Транспорт: ${fa.truck_type ? fa.truck_type.split(",").join(", ") : "любой"}`,
     `  Груз: ${fa.cargo || "любой"}`,
     ``,
     isActive ? `🟢 Мониторинг активен` : `⚫️ Мониторинг выключен`,
@@ -344,7 +370,7 @@ function buildSiteFilterText(site, siteFilters) {
     ``,
     `  Откуда: ${siteFilters.from || "любой"}`,
     `  Куда: ${siteFilters.to || "любой"}`,
-    `  Транспорт: ${siteFilters.truck_type || "любой"}`,
+    `  Транспорт: ${siteFilters.truck_type ? siteFilters.truck_type.split(",").join(", ") : "любой"}`,
     `  Груз: ${siteFilters.cargo || "любой"}`,
   ].join("\n");
 }
@@ -371,26 +397,20 @@ function buildSiteKeyboard(site) {
   };
 }
 
-function buildTruckTypeKeyboard(site) {
+function buildTruckTypeKeyboard(site, selected = new Set()) {
   const p = `ftrk:${site}`;
+  const btn = (t) => ({
+    text: selected.has(t) ? `✅ ${t}` : t,
+    callback_data: `${p}:toggle:${t}`,
+  });
+  const count = selected.size;
   return {
     inline_keyboard: [
-      [
-        { text: "тент",  callback_data: `${p}:тент`  },
-        { text: "рефр",  callback_data: `${p}:рефр`  },
-      ],
-      [
-        { text: "борт",  callback_data: `${p}:борт`  },
-        { text: "изот",  callback_data: `${p}:изот`  },
-      ],
-      [
-        { text: "конт",  callback_data: `${p}:конт`  },
-        { text: "цист",  callback_data: `${p}:цист`  },
-      ],
-      [
-        { text: "✅ любая",   callback_data: `${p}:любая` },
-        { text: "❌ Убрать",  callback_data: `${p}:clear` },
-      ],
+      [btn("тент"), btn("рефр")],
+      [btn("борт"), btn("изот")],
+      [btn("конт"), btn("цист")],
+      [btn("любая"), { text: "❌ Сбросить", callback_data: `${p}:clear` }],
+      [{ text: count > 0 ? `✅ Готово (${count})` : "✅ Готово", callback_data: `${p}:done` }],
     ],
   };
 }

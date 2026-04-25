@@ -155,7 +155,10 @@ function matchesFilters(item, filters) {
   if (!matches(item.from, filters.from)) return false;
   if (!matches(item.to, filters.to)) return false;
   if (!matches(item.cargo, filters.cargo)) return false;
-  if (!matches(item.truck_type, filters.truck_type)) return false;
+  if (filters.truck_type) {
+    const types = filters.truck_type.split(",").map(t => t.trim()).filter(Boolean);
+    if (types.length > 0 && !types.some(t => matches(item.truck_type, t))) return false;
+  }
   return true;
 }
 
