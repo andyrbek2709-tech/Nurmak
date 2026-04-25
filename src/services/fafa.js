@@ -355,6 +355,14 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
 }
 
 async function scrapeFafa(filters) {
+  // Hard 90s cap — protects the global mutex so ATI.SU always gets its turn
+  const hardTimeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("scrapeFafa hard timeout 90s")), 90000)
+  );
+  return Promise.race([_scrapeFafa(filters), hardTimeout]);
+}
+
+async function _scrapeFafa(filters) {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
@@ -516,10 +524,11 @@ async function fillSearchForm(page, filters) {
     return picked;
   };
 
-  // If filter is country-only ("Россия") — leave field empty, post-filter by country code
-  const cityFrom = extractCity(filters.from);
-  const cityTo   = extractCity(filters.to);
-  console.log(`[FAFA] form fields: cityFrom="${cityFrom || "(пусто, страна)"}" cityTo="${cityTo || "(пусто, страна)"}"`);
+  // For "from": use city part. For "to": try as-is (FA-FA.KZ autocomplete may list countries)
+  // If autocomplete finds nothing for "to" — form submits without destination, post-filter handles it
+  const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
+  const cityTo   = extractCity(filters.to); // null if country-only — skip city field
+  console.log(`[FAFA] form: cityFrom="${cityFrom || "(skip)"}" cityTo="${cityTo || "(skip)"}"`);
   if (cityFrom) await typeAndPickSuggestion("search1",  cityFrom);
   if (cityTo)   await typeAndPickSuggestion("search10", cityTo);
 
@@ -532,30 +541,30 @@ async function fillSearchForm(page, filters) {
     }, filters.truck_type).catch(() => {});
   }
 
-  // Submit: try multiple selectors, then keyboard Enter as fallback
-  const submitted = await page.evaluate(() => {
-    const candidates = [
-      document.querySelector("input[name='load_search']"),
-      document.querySelector("button[type='submit']"),
-      document.querySelector("input[type='submit']"),
-      document.querySelector(".search-btn, .btn-search, .submit"),
-    ].filter(Boolean);
-    if (candidates.length > 0) { candidates[0].click(); return candidates[0].outerHTML.slice(0, 80); }
+  // Submit — remember URL before, confirm navigation happened after
+  const prevUrl = page.url();
+  const btnHtml = await page.evaluate(() => {
+    const b =
+      document.querySelector("input[name='load_search']") ||
+      document.querySelector("input[name='sbm']") ||
+      document.querySelector("button[type='submit']") ||
+      document.querySelector("input[type='submit']");
+    if (b) { b.click(); return b.outerHTML.slice(0, 100); }
     return null;
   });
-  if (submitted) {
-    console.log(`[FAFA] submit via button: ${submitted}`);
+  if (btnHtml) {
+    console.log(`[FAFA] submit button clicked: ${btnHtml.slice(0, 60)}`);
   } else {
-    // Fallback: press Enter on the from-field
-    console.log("[FAFA] no submit button found, trying Enter key");
-    const inp = page.locator("#search1");
-    await inp.press("Enter").catch(() => {});
+    console.log("[FAFA] no submit button — pressing Enter on from-field");
+    await page.locator("#search1").press("Enter").catch(() => {});
   }
 
-  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
-  try { await page.waitForSelector("tr td a", { timeout: 8000 }); } catch (_) {}
-  await rand(800, 1200);
+  // Wait for URL to become ?sid=XXXXX — that confirms search results loaded
+  await page.waitForURL(/search_load\/\?sid=/, { timeout: 25000 }).catch(() =>
+    console.log(`[FAFA] WARNING: no ?sid= in URL after submit (${page.url()}) — submit may have failed`)
+  );
+  await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
+  await rand(500, 800);
   console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
 
