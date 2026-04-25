@@ -137,7 +137,8 @@ function parseRange(str) {
   const dash = str.match(/(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)/);
   if (dash) return { min: parseFloat(dash[1]), max: parseFloat(dash[2]) };
   const single = str.match(/(\d+(?:\.\d+)?)/);
-  return single ? { min: parseFloat(single[1]), max: null } : { min: null, max: null };
+  // Single number = maximum: "5" means "up to 5"
+  return single ? { min: null, max: parseFloat(single[1]) } : { min: null, max: null };
 }
 
 function parseItemWeight(weightStr) {

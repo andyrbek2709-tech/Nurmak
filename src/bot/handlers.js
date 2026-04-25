@@ -207,11 +207,11 @@ async function handleCallback(ctx) {
         } else if (subfield === "weight") {
           filterPending.set(chatId, { site, field: "weight", country: null });
           await ctx.answerCbQuery();
-          await ctx.reply("Укажите тоннаж (т): «10-20» диапазон, «10» минимум, «-» убрать:");
+          await ctx.reply("Укажите тоннаж (т):\n«5» — до 5 т, «10-20» — от 10 до 20 т, «-» убрать:");
         } else if (subfield === "volume") {
           filterPending.set(chatId, { site, field: "volume", country: null });
           await ctx.answerCbQuery();
-          await ctx.reply("Укажите объём (м³): «5-20» диапазон, «5» минимум, «-» убрать:");
+          await ctx.reply("Укажите объём (м³):\n«20» — до 20 м³, «5-20» — от 5 до 20 м³, «-» убрать:");
         } else {
           // from / to → show country keyboard (edit current message)
           const fieldLabels = { from: "Откуда", to: "Куда" };
