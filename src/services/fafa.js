@@ -392,6 +392,22 @@ async function scrapeFafa(filters) {
   }
 }
 
+const COUNTRY_NAMES_LC = new Set([
+  "россия", "казахстан", "беларусь", "белоруссия", "узбекистан",
+  "кыргызстан", "киргизия", "таджикистан", "туркменистан",
+  "азербайджан", "грузия", "армения", "украина", "молдова", "китай",
+]);
+
+// "Актау, Казахстан" → "Актау"; "Россия" → null (страна без города)
+function extractCity(raw) {
+  if (!raw) return null;
+  const parts = raw.split(",").map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  // Single token that is a country name → no city to fill
+  if (parts.length === 1 && COUNTRY_NAMES_LC.has(parts[0].toLowerCase())) return null;
+  return parts[0];
+}
+
 async function fillSearchForm(page, filters) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
@@ -484,8 +500,10 @@ async function fillSearchForm(page, filters) {
     return picked;
   };
 
-  const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
-  const cityTo   = filters.to   ? filters.to.split(",")[0].trim()   : null;
+  // If filter is country-only ("Россия") — leave field empty, post-filter by country code
+  const cityFrom = extractCity(filters.from);
+  const cityTo   = extractCity(filters.to);
+  console.log(`[FAFA] form fields: cityFrom="${cityFrom || "(пусто, страна)"}" cityTo="${cityTo || "(пусто, страна)"}"`);
   if (cityFrom) await typeAndPickSuggestion("search1",  cityFrom);
   if (cityTo)   await typeAndPickSuggestion("search10", cityTo);
 
