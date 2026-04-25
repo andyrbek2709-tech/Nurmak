@@ -439,89 +439,76 @@ async function fillSearchForm(page, filters) {
   console.log(`[FAFA] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
 
   const typeAndPickSuggestion = async (inputId, value) => {
-    await page.evaluate(() => {
-      document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
-    });
+    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
+    const inputLoc  = page.locator(`#${inputId}`);
 
-    await page.evaluate(({ id, v }) => {
-      const inp = document.getElementById(id);
-      if (!inp) return;
-      inp.focus();
-      inp.value = v;
-      inp.dispatchEvent(new Event("input",  { bubbles: true }));
-      inp.dispatchEvent(new Event("keyup",  { bubbles: true }));
-      inp.dispatchEvent(new Event("change", { bubbles: true }));
-    }, { id: inputId, v: value });
+    // Use real Playwright keystrokes so the FA-FA.KZ AJAX autocomplete fires properly
+    await inputLoc.click();
+    await inputLoc.fill("");
+    await inputLoc.pressSequentially(value, { delay: 80 });
 
+    // Wait for at least one suggestion to appear
+    let suggestionLoc;
     try {
-      await page.waitForSelector("div.av1", { timeout: 6000 });
-    } catch (_) {
-      console.log(`[FAFA] #${inputId}: no div.av1 for "${value}"`);
+      await page.waitForFunction(
+        () => Array.from(document.querySelectorAll("div.av1")).some(d => d.offsetParent),
+        { timeout: 7000 }
+      );
+      suggestionLoc = page.locator("div.av1").first();
+    } catch {
+      console.log(`[FAFA] #${inputId}: no autocomplete for "${value}"`);
       return null;
     }
 
-    const av1List = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("div.av1")).slice(0, 5).map(d => ({
-        text: d.textContent.trim(),
-        visible: !!d.offsetParent,
-        attrs: Array.from(d.attributes).map(a => `${a.name}=${a.value}`).join("; "),
-        html: d.outerHTML.slice(0, 300),
-      }))
-    );
+    const pickedText = (await suggestionLoc.textContent({ timeout: 2000 }).catch(() => null) || "").trim();
 
-    const visibleAv1 = av1List.find(d => d.visible);
-    if (!visibleAv1) {
-      console.log(`[FAFA] #${inputId}: no visible div.av1`);
-      return null;
-    }
-
-    const picked = visibleAv1.text;
-
-    try {
-      await page.locator("div.av1").filter({ hasText: picked.slice(0, 10) }).first().click({ timeout: 3000 });
-    } catch (_) {
+    // Click the suggestion (fires its onclick that sets the hidden city field)
+    await suggestionLoc.click({ timeout: 4000 }).catch(async () => {
       await page.evaluate(() => {
-        const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
+        const div = document.querySelector("div.av1");
         if (div) {
           div.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-          div.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true }));
           div.dispatchEvent(new MouseEvent("click",     { bubbles: true }));
         }
       });
-    }
+    });
 
-    await rand(500, 700);
+    await rand(500, 800);
 
-    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
-    const hiddenAfter = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, id: el.id, t: el.type, v: el.value }))
+    // Verify the hidden city-ID field was populated by the onclick handler
+    const cityVal = await page.evaluate((n) =>
+      document.querySelector(`input[name="${n}"]`)?.value || null, fieldName
     );
-    const citySet = hiddenAfter.some(f => f.n === fieldName && f.v);
-    if (!citySet) {
-      const onclickAttr = visibleAv1.attrs.match(/onclick=([^;]+)/)?.[1] || "";
-      const dataIdMatch = visibleAv1.attrs.match(/data-id=(\d+)/);
-      const onclickIdMatch = onclickAttr.match(/\d+/);
-      const cityId = dataIdMatch?.[1] || onclickIdMatch?.[0] || null;
+
+    if (cityVal) {
+      console.log(`[FAFA] #${inputId}: "${pickedText}" → ${fieldName}="${cityVal}"`);
+    } else {
+      // Fallback: extract city ID from suggestion's data-id / onclick and set manually
+      const cityId = await page.evaluate(() => {
+        const div = document.querySelector("div.av1");
+        if (!div) return null;
+        const d = div.getAttribute("data-id");
+        if (d) return d;
+        const oc = div.getAttribute("onclick") || "";
+        return oc.match(/\d+/)?.[0] || null;
+      });
       if (cityId) {
         await page.evaluate(({ name, val }) => {
-          let inp = document.querySelector(`input[name="${name}"]`);
-          if (!inp) {
-            inp = document.createElement("input");
-            inp.type = "hidden"; inp.name = name;
-            const form = document.querySelector("form");
-            if (form) form.appendChild(inp);
+          let el = document.querySelector(`input[name="${name}"]`);
+          if (!el) {
+            el = Object.assign(document.createElement("input"), { type: "hidden", name });
+            document.querySelector("form")?.appendChild(el);
           }
-          inp.value = val;
+          el.value = val;
         }, { name: fieldName, val: cityId });
-        console.log(`[FAFA] #${inputId}: manually set ${fieldName}=${cityId}`);
+        console.log(`[FAFA] #${inputId}: fallback set ${fieldName}="${cityId}" for "${pickedText}"`);
       } else {
-        console.log(`[FAFA] #${inputId}: WARNING — ${fieldName} not set, onclick="${onclickAttr}"`);
+        console.log(`[FAFA] #${inputId}: WARNING — ${fieldName} not set for "${pickedText}"`);
       }
     }
 
-    console.log(`[FAFA] #${inputId} picked: "${picked}"`);
     await rand(300, 500);
-    return picked;
+    return pickedText || null;
   };
 
   // For "from": use city part. For "to": try as-is (FA-FA.KZ autocomplete may list countries)
