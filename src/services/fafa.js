@@ -45,6 +45,30 @@ async function getOrInitUser(chatId) {
 
 export function initFafa(bot) {
   _bot = bot;
+  restoreMonitoring();
+}
+
+// ─── Monitoring persistence ───────────────────────────────────────────────────
+
+async function saveMonitorList(set) {
+  await saveBotSetting("active_monitors", JSON.stringify([...set])).catch(() => {});
+}
+
+async function restoreMonitoring() {
+  try {
+    const raw = await loadBotSetting("active_monitors");
+    if (!raw) return;
+    const list = JSON.parse(raw);
+    if (!list.length) return;
+    console.log(`[FAFA] restoring monitoring for ${list.length} users:`, list);
+    for (const chatId of list) {
+      startMonitoring(chatId).catch(e =>
+        console.error(`[FAFA] restore error for ${chatId}:`, e.message)
+      );
+    }
+  } catch (err) {
+    console.error("[FAFA] restoreMonitoring error:", err.message);
+  }
 }
 
 export async function isMonitoringActive(chatId) {
@@ -77,6 +101,11 @@ export async function startMonitoring(chatId) {
   u.isRunning = true;
   u.seenKeys.clear();
   u.lastNoResultsAt = Date.now();
+  // Persist active monitor list
+  const raw = await loadBotSetting("active_monitors").catch(() => null);
+  const list = new Set(raw ? JSON.parse(raw) : []);
+  list.add(String(chatId));
+  await saveMonitorList(list);
   console.log(`[FAFA] monitoring started for ${chatId}`);
   await tick(chatId);
 }
@@ -87,6 +116,11 @@ export async function stopMonitoring(chatId) {
   u.isRunning = false;
   if (u.monitorTimer) { clearTimeout(u.monitorTimer); u.monitorTimer = null; }
   u.seenKeys.clear();
+  // Remove from persisted list
+  const raw = await loadBotSetting("active_monitors").catch(() => null);
+  const list = new Set(raw ? JSON.parse(raw) : []);
+  list.delete(String(chatId));
+  await saveMonitorList(list);
   console.log(`[FAFA] monitoring stopped for ${chatId}`);
 }
 

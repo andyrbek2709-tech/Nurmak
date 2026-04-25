@@ -30,6 +30,7 @@ export function registerHandlers(bot) {
   bot.command("active", ownerOnly((ctx) => handleOwnerList(ctx, "in_progress", "🔄 В работе")));
   bot.command("today", ownerOnly(handleOwnerToday));
   bot.command("monitor", handleMonitor);
+  bot.command("stop", handleStop);
   bot.command("filter", handleFilter);
   bot.command("search", handleSearchOnce);
   bot.command("help", handleHelp);
@@ -191,7 +192,7 @@ async function handleCallback(ctx) {
           const isActive = await isMonitoringActive(chatId);
           await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) }).catch(() => {});
         } else if (subfield === "clear_site") {
-          for (const f of ["from", "to", "cargo", "truck_type"]) {
+          for (const f of ["from", "to", "truck_type", "weight", "volume"]) {
             await setFilter(chatId, site, f, null);
           }
           await ctx.answerCbQuery("Сброшено");
@@ -470,6 +471,21 @@ async function handleMonitor(ctx) {
   }
 }
 
+async function handleStop(ctx) {
+  const chatId = String(ctx.chat.id);
+  try {
+    if (await isMonitoringActive(chatId)) {
+      await stopMonitoring(chatId);
+      await ctx.reply("⏹ Мониторинг остановлен.");
+    } else {
+      await ctx.reply("Мониторинг не был запущен.");
+    }
+  } catch (err) {
+    console.error("Stop command error:", err.message);
+    await ctx.reply(`❌ Ошибка: ${err.message}`);
+  }
+}
+
 async function handleSearchOnce(ctx) {
   const chatId = String(ctx.chat.id);
   await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
@@ -489,11 +505,13 @@ async function handleHelp(ctx) {
   await ctx.reply([
     `📖 Команды бота`,
     ``,
-    `/filter — фильтры и мониторинг (FA-FA.KZ + ATI.SU)`,
+    `/filter — фильтры поиска (FA-FA.KZ + ATI.SU)`,
     `/search — разовый поиск по обоим сайтам`,
+    `/monitor — запустить мониторинг (каждые 5 мин)`,
+    `/stop — остановить мониторинг`,
     ``,
-    `Проверка каждые 5 мин. Новый груз — сразу.`,
-    `Если ничего нового — раз в час "нет новых".`,
+    `Новый груз — уведомление сразу.`,
+    `Если ничего нового — раз в час.`,
     `Напишите - (минус) чтобы убрать фильтр.`,
   ].join("\n"));
 }
