@@ -376,28 +376,63 @@ async function _scrapeFafa(filters) {
     });
     const page = await context.newPage();
 
-    // Load search page (establishes session cookies, loads form with all hidden fields)
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await rand(400, 700);
-    console.log(`[FAFA] search page loaded, filling: from="${filters.from || ""}" to="${filters.to || ""}"`);
+    await rand(500, 800);
 
-    // Fill fields directly — server accepts plain text, no city IDs needed.
-    // #search1 → City[1] (from), #search10 → city_end (to).
-    // page.fill() dispatches input/change but NOT keyup, so autocomplete won't fire.
-    if (filters.from) {
-      await page.fill("#search1", filters.from).catch(() =>
-        page.evaluate((v) => { const el = document.querySelector("#search1"); if (el) el.value = v; }, filters.from)
-      );
+    // Diagnose: log actual form inputs so we know which IDs/names exist
+    const formInfo = await page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll("input[type='text'], input:not([type])[id], input:not([type])[name]"))
+        .map(el => `id=${el.id||"-"} name=${el.name||"-"} ph="${(el.placeholder||"").slice(0,20)}"`)
+        .slice(0, 12);
+      return {
+        s1: !!document.querySelector("#search1"),
+        s10: !!document.querySelector("#search10"),
+        submitBtn: !!document.querySelector("input[name='load_search']"),
+        inputs,
+      };
+    });
+    console.log(`[FAFA] form: #search1=${formInfo.s1} #search10=${formInfo.s10} submit=${formInfo.submitBtn}`);
+    console.log(`[FAFA] inputs: ${formInfo.inputs.join(" | ")}`);
+
+    // Fill FROM field using pressSequentially to trigger AJAX autocomplete
+    const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
+    if (cityFrom && formInfo.s1) {
+      await page.click("#search1");
+      await page.locator("#search1").pressSequentially(cityFrom, { delay: 80 });
+      await rand(1500, 2000);
+      const firstSug = page.locator("div.av1").first();
+      const hasSug = await firstSug.isVisible({ timeout: 1000 }).catch(() => false);
+      if (hasSug) {
+        await firstSug.click().catch(() => {});
+        console.log(`[FAFA] from: autocomplete suggestion clicked for "${cityFrom}"`);
+      } else {
+        console.log(`[FAFA] from: no autocomplete, leaving typed value "${cityFrom}"`);
+      }
+    } else if (cityFrom) {
+      console.log(`[FAFA] from: #search1 not found, skipping`);
     }
-    if (filters.to) {
-      await page.fill("#search10", filters.to).catch(() =>
-        page.evaluate((v) => { const el = document.querySelector("#search10"); if (el) el.value = v; }, filters.to)
-      );
+
+    // TO field: try same approach; if country-only ("Россия") — skip, post-filter handles it
+    const cityTo = filters.to ? extractCity(filters.to) : null;
+    if (cityTo && formInfo.s10) {
+      await page.click("#search10");
+      await page.locator("#search10").pressSequentially(cityTo, { delay: 80 });
+      await rand(1500, 2000);
+      const firstSug = page.locator("div.av1").first();
+      const hasSug = await firstSug.isVisible({ timeout: 1000 }).catch(() => false);
+      if (hasSug) {
+        await firstSug.click().catch(() => {});
+        console.log(`[FAFA] to: autocomplete suggestion clicked for "${cityTo}"`);
+      } else {
+        console.log(`[FAFA] to: no autocomplete, leaving typed value "${cityTo}"`);
+      }
+    } else {
+      console.log(`[FAFA] to: "${filters.to || ""}" is country-only or #search10 missing — skipped, post-filter handles it`);
     }
 
     await rand(300, 500);
 
-    // Submit via browser — browser includes session cookies + all hidden form fields automatically
+    // Submit
     await page.evaluate(() => {
       const btn =
         document.querySelector("input[name='load_search']") ||
@@ -406,15 +441,16 @@ async function _scrapeFafa(filters) {
       if (btn) btn.click();
     });
 
-    // Wait for redirect to ?sid=XXXXX (search results page)
     try {
-      await page.waitForURL(/search_load\/\?sid=/, { timeout: 20000 });
+      await page.waitForURL(/search_load\/\?sid=/, { timeout: 25000 });
     } catch {
       console.log(`[FAFA] WARNING: no ?sid= after submit (URL: ${page.url()})`);
       return [];
     }
 
     await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+    const finalUrl = page.url();
+    console.log(`[FAFA] results page: ${finalUrl}`);
     const items = await extractItems(page);
     console.log(`[FAFA] extractItems: ${items.length} items`);
     items.slice(0, 5).forEach((it, i) =>
