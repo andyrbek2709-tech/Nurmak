@@ -196,7 +196,85 @@ async function saveMonitorList(set) {
 
 ---
 
+## Диагностика — какие инструменты использовать и в каком порядке
+
+Когда что-то ломается, **не правь код наугад**. Сначала пойми что происходит. Порядок:
+
+### 1. Запусти скрапер локально (быстрее всего, видно сразу что отдаёт сайт)
+
+```bash
+# Один раз поставить Chromium (если не было)
+"C:\Program Files\nodejs\npx.cmd" playwright install chromium
+
+# Запустить разовый диагностический скрипт
+& "C:\Program Files\nodejs\node.exe" diag_fafa.js
+```
+
+Скрипт `diag_fafa.js` — временный, создаётся под конкретную задачу и удаляется после: launches Playwright с теми же фильтрами что у пользователя, дампит `forms`/`inputs`/`selects`, кликает по полям, сохраняет HTML результата (`fafa_results.html`) и скриншот. Локальный запуск показывает: какие поля принимает форма, что появляется в autocomplete, какой URL после submit, какой title (`найдено N шт.`), все ли результаты на странице или есть пагинация.
+
+**Это нашло корневую причину FA-FA.KZ за минуту:** title "найдено 70 шт." + все маршруты KZ→KZ → проблема не в скрапере, а в том что мы не передавали страну в форму.
+
+### 2. Логи Railway через GraphQL API
+
+Токен лежит в `~/.railway/config.json` → `user.accessToken`, истекает каждые ~30 минут.
+
+```bash
+TOKEN=$(grep -oE '"accessToken":\s*"[^"]+' ~/.railway/config.json | cut -d'"' -f4)
+curl -s -X POST https://backboard.railway.com/graphql/v2 \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"{ deploymentLogs(deploymentId: \"<ID>\", limit: 200, filter: \"FAFA\") { timestamp message } }"}'
+```
+
+ID Nurmak (закэшированы):
+- workspace: `b45388e2-f11d-4739-9e50-6bb21588125f`
+- project: `789c93ee-6126-424c-9d1a-6c6ad113f637`
+- service: `61a2ff81-36ce-42c2-97b0-86f8a0655a46`
+- environment (production): `6e687022-7ea6-4499-93fd-5b2c51e2b130`
+
+Также `variables(projectId, environmentId, serviceId)` — выдаёт все env vars (имена + значения).
+
+### 3. Тестирование бота через webhook без участия пользователя
+
+```bash
+# 1. baseline: отправить контрольное сообщение, запомнить message_id
+curl https://api.telegram.org/bot<TOKEN>/sendMessage -d "chat_id=<MGR>" -d "text=BASELINE"
+# 2. отправить fake update в webhook
+curl -X POST https://nurmak-production.up.railway.app/webhook/<TOKEN> \
+  -H "Content-Type: application/json" \
+  -d '{"update_id":..., "callback_query":{"id":"...","from":{...},"message":{...},"data":"fset:search"}}'
+# 3. подождать ~3 мин (FAFA до 90с + ATI до 120с + sequential)
+# 4. отправить endpoint message, посчитать gap
+# gap = (endpoint_id − baseline_id − 1) = число сообщений от бота
+```
+
+Структура сообщений при `/search`: 1 (header) + N (items) + 1 (footer). Если gap=4 → 2 items, gap=5 → 3 items, и т.д.
+
+### 4. Чтение содержимого Telegram-сообщений (бот не имеет getHistory)
+
+```bash
+# forwardMessage возвращает Message object с полным text — используй для проверки что именно отправил бот
+curl https://api.telegram.org/bot<TOKEN>/forwardMessage \
+  -d "chat_id=<MGR>" -d "from_chat_id=<MGR>" -d "message_id=<MID>" -d "disable_notification=true"
+```
+
+### 5. Чтение пользовательских фильтров из Supabase
+
+`SELECT key, value FROM bot_settings WHERE key = 'filters_<chatId>';` — возвращает JSON фильтра. Понадобится чтобы понять что именно ищет пользователь, не догадываясь.
+
+### Чего не делать
+- Не пушить «добавил логи, посмотри» — сначала диагностика локально/через API, потом фикс, потом пуш
+- Не пытаться угадывать секретные значения env vars — спрашивай или не трогай
+- Не интерпретировать `gap=4` как «работает» — нужно forwardMessage и реально прочитать тексты, чтобы убедиться что заявки от обоих сайтов
+
+---
+
 ## Changelog
+
+### 2026-04-26
+- **FA-FA.KZ принимает страны текстом** — `city_end="Россия"` → сервер сам фильтрует, title "Грузы Актау→Россия". Удалены `extractCity()` и `COUNTRY_NAMES_LC`, баг был в том что страны пропускались и сайт возвращал все 70 грузов из Актау (KZ→KZ), пост-фильтр всё срезал
+- **FA-FA.KZ login сделан опциональным** — анонимный пользователь видит заявки, `doLogin` вызывается только если `FAFA_LOGIN`+`FAFA_PASSWORD` оба заданы; на ошибке логина продолжаем без авторизации
+- **Восстановлен event-dispatch fillSearchForm** — `inp.dispatchEvent(input/keyup/change)` вместо `pressSequentially`; даже если `div.av1` autocomplete не появился, текстовое значение `City[1]`/`city_end` всё равно отправляется и сервер парсит
 
 ### 2026-04-25
 - **Раздельные фильтры FA-FA.KZ / ATI.SU** — `u.filters = { fafa: {...}, atisu: {...} }` вместо одного объекта
