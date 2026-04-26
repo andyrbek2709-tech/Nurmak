@@ -410,22 +410,6 @@ async function _scrapeFafa(filters) {
   }
 }
 
-const COUNTRY_NAMES_LC = new Set([
-  "россия", "казахстан", "беларусь", "белоруссия", "узбекистан",
-  "кыргызстан", "киргизия", "таджикистан", "туркменистан",
-  "азербайджан", "грузия", "армения", "украина", "молдова", "китай",
-]);
-
-// "Актау, Казахстан" → "Актау"; "Россия" → null (страна без города)
-function extractCity(raw) {
-  if (!raw) return null;
-  const parts = raw.split(",").map(p => p.trim()).filter(Boolean);
-  if (!parts.length) return null;
-  // Single token that is a country name → no city to fill
-  if (parts.length === 1 && COUNTRY_NAMES_LC.has(parts[0].toLowerCase())) return null;
-  return parts[0];
-}
-
 async function fillSearchForm(page, filters) {
   const hasFilters = filters.from || filters.to || filters.truck_type;
   if (!hasFilters) return;
@@ -517,9 +501,10 @@ async function fillSearchForm(page, filters) {
     return picked;
   };
 
-  // For "from": use city part. For "to": skip if country-only ("Россия") — post-filter handles it.
+  // FA-FA.KZ accepts plain text in both fields (city or country) — no need to skip countries.
+  // Server filters by the typed text directly, e.g. city_end="Россия" → routes Актау→RU only.
   const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
-  const cityTo   = extractCity(filters.to);
+  const cityTo   = filters.to   ? filters.to.split(",")[0].trim()   : null;
   if (cityFrom) await typeAndPickSuggestion("search1",  cityFrom);
   if (cityTo)   await typeAndPickSuggestion("search10", cityTo);
 
