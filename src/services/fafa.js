@@ -379,8 +379,17 @@ async function _scrapeFafa(filters) {
     await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
     await rand(1500, 2500);
 
-    const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
-    if (!hasAuth) await doLogin(page);
+    // Login is optional — FA-FA.KZ shows search results to anonymous users too.
+    // Try to log in only if credentials are present; never let login failure block search.
+    if (process.env.FAFA_LOGIN && process.env.FAFA_PASSWORD) {
+      const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
+      if (!hasAuth) {
+        try { await doLogin(page); }
+        catch (e) { console.log(`[FAFA] login failed, continuing anonymously: ${e.message}`); }
+      }
+    } else {
+      console.log("[FAFA] no FAFA_LOGIN credentials — searching anonymously");
+    }
 
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
     await rand(1500, 2000);
