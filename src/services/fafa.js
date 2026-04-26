@@ -362,25 +362,6 @@ async function scrapeFafa(filters) {
   return Promise.race([_scrapeFafa(filters), hardTimeout]);
 }
 
-// Fetch city ID from FA-FA.KZ autocomplete API using browser's CF-cleared cookies
-async function fetchCityId(page, cityName) {
-  const url = `https://fa-fa.kz/city.php?n=1&str=${encodeURIComponent(cityName)}`;
-  try {
-    const resp = await page.request.get(url);
-    const html = await resp.text();
-    // Response HTML: <div ... onclick="setCity(ID,'Name')">...</div>
-    const match = html.match(/setCity\((\d+)/);
-    if (match) {
-      console.log(`[FAFA] cityId for "${cityName}": ${match[1]}`);
-      return match[1];
-    }
-    console.log(`[FAFA] cityId for "${cityName}": not found in response (len=${html.length})`);
-  } catch (e) {
-    console.log(`[FAFA] cityId fetch error: ${e.message}`);
-  }
-  return null;
-}
-
 async function _scrapeFafa(filters) {
   const browser = await chromium.launch({
     headless: true,
@@ -395,82 +376,19 @@ async function _scrapeFafa(filters) {
     });
     const page = await context.newPage();
 
-    // Visit main site first → Cloudflare sets clearance cookies for the entire domain
     await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await rand(1000, 1500);
+    await rand(1500, 2500);
 
-    // Log in — FA-FA.KZ requires auth to view search results
-    await doLogin(page);
-    await rand(500, 1000);
+    const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
+    if (!hasAuth) await doLogin(page);
 
-    // Navigate to search page
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
-    await rand(800, 1200);
+    await rand(1500, 2000);
 
-    const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
-    // For "to": if country-only ("Россия") skip city field — post-filter handles country matching
-    const cityTo = filters.to ? extractCity(filters.to) : null;
+    await fillSearchForm(page, filters);
 
-    console.log(`[FAFA] searching: from="${cityFrom || ""}" to="${cityTo || "(country-only, skipped)"}"`);
-
-    // Get city ID via autocomplete API — browser context has CF cookies from main page visit
-    if (cityFrom) {
-      const cityId = await fetchCityId(page, cityFrom);
-      if (cityId) {
-        // Inject city ID into City[1] hidden field (what the form actually submits)
-        await page.evaluate(({ id }) => {
-          let el = document.querySelector("input[name='City[1]']");
-          if (!el) {
-            el = Object.assign(document.createElement("input"), { type: "hidden", name: "City[1]" });
-            document.querySelector("form")?.appendChild(el);
-          }
-          el.value = id;
-          // Also set visible text input so server has both
-          const vis = document.querySelector("#search1");
-          if (vis) vis.value = document.querySelector("div.av1")?.textContent?.trim() || vis.value;
-        }, { id: cityId });
-        console.log(`[FAFA] from: City[1]=${cityId}`);
-      } else {
-        // Fallback: type into visible field and hope server geocodes it
-        await page.fill("#search1", cityFrom).catch(() => {});
-        console.log(`[FAFA] from: no cityId, filled text "${cityFrom}"`);
-      }
-    }
-
-    if (cityTo) {
-      const cityId = await fetchCityId(page, cityTo);
-      if (cityId) {
-        await page.evaluate(({ id }) => {
-          let el = document.querySelector("input[name='city_end']");
-          if (!el) {
-            el = Object.assign(document.createElement("input"), { type: "hidden", name: "city_end" });
-            document.querySelector("form")?.appendChild(el);
-          }
-          el.value = id;
-        }, { id: cityId });
-        console.log(`[FAFA] to: city_end=${cityId}`);
-      } else {
-        await page.fill("#search10", cityTo).catch(() => {});
-        console.log(`[FAFA] to: no cityId, filled text "${cityTo}"`);
-      }
-    }
-
-    await rand(300, 500);
-
-    // Submit — use browser form submit to include all existing hidden fields + session
-    await page.evaluate(() => {
-      const btn =
-        document.querySelector("input[name='load_search']") ||
-        document.querySelector("input[type='submit']") ||
-        document.querySelector("button[type='submit']");
-      if (btn) btn.click();
-    });
-
-    // Wait for results (networkidle, not strictly ?sid= — be tolerant)
-    await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-    const finalUrl = page.url();
-    console.log(`[FAFA] after submit URL: ${finalUrl}`);
+    await rand(2000, 3000);
+    console.log(`[FAFA] scraping URL: ${page.url()}, title: ${await page.title()}`);
 
     const items = await extractItems(page);
     console.log(`[FAFA] extractItems: ${items.length} items`);
@@ -506,83 +424,93 @@ async function fillSearchForm(page, filters) {
   console.log(`[FAFA] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
 
   const typeAndPickSuggestion = async (inputId, value) => {
-    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
-    const inputLoc  = page.locator(`#${inputId}`);
+    await page.evaluate(() => {
+      document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
+    });
 
-    // Use real Playwright keystrokes so the FA-FA.KZ AJAX autocomplete fires properly
-    await inputLoc.click();
-    await inputLoc.fill("");
-    await inputLoc.pressSequentially(value, { delay: 80 });
+    await page.evaluate(({ id, v }) => {
+      const inp = document.getElementById(id);
+      if (!inp) return;
+      inp.focus();
+      inp.value = v;
+      inp.dispatchEvent(new Event("input",  { bubbles: true }));
+      inp.dispatchEvent(new Event("keyup",  { bubbles: true }));
+      inp.dispatchEvent(new Event("change", { bubbles: true }));
+    }, { id: inputId, v: value });
 
-    // Wait for at least one suggestion to appear
-    let suggestionLoc;
     try {
-      await page.waitForFunction(
-        () => Array.from(document.querySelectorAll("div.av1")).some(d => d.offsetParent),
-        { timeout: 7000 }
-      );
-      suggestionLoc = page.locator("div.av1").first();
-    } catch {
-      console.log(`[FAFA] #${inputId}: no autocomplete for "${value}"`);
+      await page.waitForSelector("div.av1", { timeout: 6000 });
+    } catch (_) {
+      console.log(`[FAFA] #${inputId}: no div.av1 for "${value}"`);
       return null;
     }
 
-    const pickedText = (await suggestionLoc.textContent({ timeout: 2000 }).catch(() => null) || "").trim();
+    const av1List = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("div.av1")).slice(0, 5).map(d => ({
+        text: d.textContent.trim(),
+        visible: !!d.offsetParent,
+        attrs: Array.from(d.attributes).map(a => `${a.name}=${a.value}`).join("; "),
+      }))
+    );
 
-    // Click the suggestion (fires its onclick that sets the hidden city field)
-    await suggestionLoc.click({ timeout: 4000 }).catch(async () => {
+    const visibleAv1 = av1List.find(d => d.visible);
+    if (!visibleAv1) {
+      console.log(`[FAFA] #${inputId}: no visible div.av1`);
+      return null;
+    }
+
+    const picked = visibleAv1.text;
+
+    try {
+      await page.locator("div.av1").filter({ hasText: picked.slice(0, 10) }).first().click({ timeout: 3000 });
+    } catch (_) {
       await page.evaluate(() => {
-        const div = document.querySelector("div.av1");
+        const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
         if (div) {
           div.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+          div.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true }));
           div.dispatchEvent(new MouseEvent("click",     { bubbles: true }));
         }
       });
-    });
+    }
 
-    await rand(500, 800);
+    await rand(500, 700);
 
-    // Verify the hidden city-ID field was populated by the onclick handler
-    const cityVal = await page.evaluate((n) =>
-      document.querySelector(`input[name="${n}"]`)?.value || null, fieldName
+    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
+    const hiddenAfter = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, v: el.value }))
     );
-
-    if (cityVal) {
-      console.log(`[FAFA] #${inputId}: "${pickedText}" → ${fieldName}="${cityVal}"`);
-    } else {
-      // Fallback: extract city ID from suggestion's data-id / onclick and set manually
-      const cityId = await page.evaluate(() => {
-        const div = document.querySelector("div.av1");
-        if (!div) return null;
-        const d = div.getAttribute("data-id");
-        if (d) return d;
-        const oc = div.getAttribute("onclick") || "";
-        return oc.match(/\d+/)?.[0] || null;
-      });
+    const citySet = hiddenAfter.some(f => f.n === fieldName && f.v);
+    if (!citySet) {
+      const onclickAttr = visibleAv1.attrs.match(/onclick=([^;]+)/)?.[1] || "";
+      const dataIdMatch = visibleAv1.attrs.match(/data-id=(\d+)/);
+      const onclickIdMatch = onclickAttr.match(/\d+/);
+      const cityId = dataIdMatch?.[1] || onclickIdMatch?.[0] || null;
       if (cityId) {
         await page.evaluate(({ name, val }) => {
-          let el = document.querySelector(`input[name="${name}"]`);
-          if (!el) {
-            el = Object.assign(document.createElement("input"), { type: "hidden", name });
-            document.querySelector("form")?.appendChild(el);
+          let inp = document.querySelector(`input[name="${name}"]`);
+          if (!inp) {
+            inp = document.createElement("input");
+            inp.type = "hidden"; inp.name = name;
+            const form = document.querySelector("form");
+            if (form) form.appendChild(inp);
           }
-          el.value = val;
+          inp.value = val;
         }, { name: fieldName, val: cityId });
-        console.log(`[FAFA] #${inputId}: fallback set ${fieldName}="${cityId}" for "${pickedText}"`);
+        console.log(`[FAFA] #${inputId}: manually set ${fieldName}=${cityId}`);
       } else {
-        console.log(`[FAFA] #${inputId}: WARNING — ${fieldName} not set for "${pickedText}"`);
+        console.log(`[FAFA] #${inputId}: WARNING — ${fieldName} not set, onclick="${onclickAttr}"`);
       }
     }
 
+    console.log(`[FAFA] #${inputId} picked: "${picked}"`);
     await rand(300, 500);
-    return pickedText || null;
+    return picked;
   };
 
-  // For "from": use city part. For "to": try as-is (FA-FA.KZ autocomplete may list countries)
-  // If autocomplete finds nothing for "to" — form submits without destination, post-filter handles it
+  // For "from": use city part. For "to": skip if country-only ("Россия") — post-filter handles it.
   const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
-  const cityTo   = extractCity(filters.to); // null if country-only — skip city field
-  console.log(`[FAFA] form: cityFrom="${cityFrom || "(skip)"}" cityTo="${cityTo || "(skip)"}"`);
+  const cityTo   = extractCity(filters.to);
   if (cityFrom) await typeAndPickSuggestion("search1",  cityFrom);
   if (cityTo)   await typeAndPickSuggestion("search10", cityTo);
 
@@ -595,30 +523,16 @@ async function fillSearchForm(page, filters) {
     }, filters.truck_type).catch(() => {});
   }
 
-  // Submit — remember URL before, confirm navigation happened after
-  const prevUrl = page.url();
-  const btnHtml = await page.evaluate(() => {
-    const b =
-      document.querySelector("input[name='load_search']") ||
-      document.querySelector("input[name='sbm']") ||
-      document.querySelector("button[type='submit']") ||
-      document.querySelector("input[type='submit']");
-    if (b) { b.click(); return b.outerHTML.slice(0, 100); }
-    return null;
+  await page.evaluate(() => {
+    const btn = document.querySelector("input[name='load_search']");
+    if (btn) btn.click();
   });
-  if (btnHtml) {
-    console.log(`[FAFA] submit button clicked: ${btnHtml.slice(0, 60)}`);
-  } else {
-    console.log("[FAFA] no submit button — pressing Enter on from-field");
-    await page.locator("#search1").press("Enter").catch(() => {});
-  }
+  console.log("[FAFA] search submitted");
 
-  // Wait for URL to become ?sid=XXXXX — that confirms search results loaded
-  await page.waitForURL(/search_load\/\?sid=/, { timeout: 25000 }).catch(() =>
-    console.log(`[FAFA] WARNING: no ?sid= in URL after submit (${page.url()}) — submit may have failed`)
-  );
-  await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
-  await rand(500, 800);
+  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+  await page.waitForLoadState("networkidle", { timeout: 20000 }).catch(() => {});
+  try { await page.waitForSelector("tr td a", { timeout: 10000 }); } catch (_) {}
+  await rand(800, 1200);
   console.log(`[FAFA] search done, URL: ${page.url()}`);
 }
 
