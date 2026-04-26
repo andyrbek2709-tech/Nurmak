@@ -362,6 +362,25 @@ async function scrapeFafa(filters) {
   return Promise.race([_scrapeFafa(filters), hardTimeout]);
 }
 
+// Fetch city ID from FA-FA.KZ autocomplete API using browser's CF-cleared cookies
+async function fetchCityId(page, cityName) {
+  const url = `https://fa-fa.kz/city.php?n=1&str=${encodeURIComponent(cityName)}`;
+  try {
+    const resp = await page.request.get(url);
+    const html = await resp.text();
+    // Response HTML: <div ... onclick="setCity(ID,'Name')">...</div>
+    const match = html.match(/setCity\((\d+)/);
+    if (match) {
+      console.log(`[FAFA] cityId for "${cityName}": ${match[1]}`);
+      return match[1];
+    }
+    console.log(`[FAFA] cityId for "${cityName}": not found in response (len=${html.length})`);
+  } catch (e) {
+    console.log(`[FAFA] cityId fetch error: ${e.message}`);
+  }
+  return null;
+}
+
 async function _scrapeFafa(filters) {
   const browser = await chromium.launch({
     headless: true,
@@ -376,63 +395,69 @@ async function _scrapeFafa(filters) {
     });
     const page = await context.newPage();
 
-    await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await rand(500, 800);
+    // Visit main site first → Cloudflare sets clearance cookies for the entire domain
+    await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await rand(1000, 1500);
 
-    // Diagnose: log actual form inputs so we know which IDs/names exist
-    const formInfo = await page.evaluate(() => {
-      const inputs = Array.from(document.querySelectorAll("input[type='text'], input:not([type])[id], input:not([type])[name]"))
-        .map(el => `id=${el.id||"-"} name=${el.name||"-"} ph="${(el.placeholder||"").slice(0,20)}"`)
-        .slice(0, 12);
-      return {
-        s1: !!document.querySelector("#search1"),
-        s10: !!document.querySelector("#search10"),
-        submitBtn: !!document.querySelector("input[name='load_search']"),
-        inputs,
-      };
-    });
-    console.log(`[FAFA] form: #search1=${formInfo.s1} #search10=${formInfo.s10} submit=${formInfo.submitBtn}`);
-    console.log(`[FAFA] inputs: ${formInfo.inputs.join(" | ")}`);
+    // Log in — FA-FA.KZ requires auth to view search results
+    await doLogin(page);
+    await rand(500, 1000);
 
-    // Fill FROM field using pressSequentially to trigger AJAX autocomplete
+    // Navigate to search page
+    await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+    await rand(800, 1200);
+
     const cityFrom = filters.from ? filters.from.split(",")[0].trim() : null;
-    if (cityFrom && formInfo.s1) {
-      await page.click("#search1");
-      await page.locator("#search1").pressSequentially(cityFrom, { delay: 80 });
-      await rand(1500, 2000);
-      const firstSug = page.locator("div.av1").first();
-      const hasSug = await firstSug.isVisible({ timeout: 1000 }).catch(() => false);
-      if (hasSug) {
-        await firstSug.click().catch(() => {});
-        console.log(`[FAFA] from: autocomplete suggestion clicked for "${cityFrom}"`);
+    // For "to": if country-only ("Россия") skip city field — post-filter handles country matching
+    const cityTo = filters.to ? extractCity(filters.to) : null;
+
+    console.log(`[FAFA] searching: from="${cityFrom || ""}" to="${cityTo || "(country-only, skipped)"}"`);
+
+    // Get city ID via autocomplete API — browser context has CF cookies from main page visit
+    if (cityFrom) {
+      const cityId = await fetchCityId(page, cityFrom);
+      if (cityId) {
+        // Inject city ID into City[1] hidden field (what the form actually submits)
+        await page.evaluate(({ id }) => {
+          let el = document.querySelector("input[name='City[1]']");
+          if (!el) {
+            el = Object.assign(document.createElement("input"), { type: "hidden", name: "City[1]" });
+            document.querySelector("form")?.appendChild(el);
+          }
+          el.value = id;
+          // Also set visible text input so server has both
+          const vis = document.querySelector("#search1");
+          if (vis) vis.value = document.querySelector("div.av1")?.textContent?.trim() || vis.value;
+        }, { id: cityId });
+        console.log(`[FAFA] from: City[1]=${cityId}`);
       } else {
-        console.log(`[FAFA] from: no autocomplete, leaving typed value "${cityFrom}"`);
+        // Fallback: type into visible field and hope server geocodes it
+        await page.fill("#search1", cityFrom).catch(() => {});
+        console.log(`[FAFA] from: no cityId, filled text "${cityFrom}"`);
       }
-    } else if (cityFrom) {
-      console.log(`[FAFA] from: #search1 not found, skipping`);
     }
 
-    // TO field: try same approach; if country-only ("Россия") — skip, post-filter handles it
-    const cityTo = filters.to ? extractCity(filters.to) : null;
-    if (cityTo && formInfo.s10) {
-      await page.click("#search10");
-      await page.locator("#search10").pressSequentially(cityTo, { delay: 80 });
-      await rand(1500, 2000);
-      const firstSug = page.locator("div.av1").first();
-      const hasSug = await firstSug.isVisible({ timeout: 1000 }).catch(() => false);
-      if (hasSug) {
-        await firstSug.click().catch(() => {});
-        console.log(`[FAFA] to: autocomplete suggestion clicked for "${cityTo}"`);
+    if (cityTo) {
+      const cityId = await fetchCityId(page, cityTo);
+      if (cityId) {
+        await page.evaluate(({ id }) => {
+          let el = document.querySelector("input[name='city_end']");
+          if (!el) {
+            el = Object.assign(document.createElement("input"), { type: "hidden", name: "city_end" });
+            document.querySelector("form")?.appendChild(el);
+          }
+          el.value = id;
+        }, { id: cityId });
+        console.log(`[FAFA] to: city_end=${cityId}`);
       } else {
-        console.log(`[FAFA] to: no autocomplete, leaving typed value "${cityTo}"`);
+        await page.fill("#search10", cityTo).catch(() => {});
+        console.log(`[FAFA] to: no cityId, filled text "${cityTo}"`);
       }
-    } else {
-      console.log(`[FAFA] to: "${filters.to || ""}" is country-only or #search10 missing — skipped, post-filter handles it`);
     }
 
     await rand(300, 500);
 
-    // Submit
+    // Submit — use browser form submit to include all existing hidden fields + session
     await page.evaluate(() => {
       const btn =
         document.querySelector("input[name='load_search']") ||
@@ -441,16 +466,12 @@ async function _scrapeFafa(filters) {
       if (btn) btn.click();
     });
 
-    try {
-      await page.waitForURL(/search_load\/\?sid=/, { timeout: 25000 });
-    } catch {
-      console.log(`[FAFA] WARNING: no ?sid= after submit (URL: ${page.url()})`);
-      return [];
-    }
-
-    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+    // Wait for results (networkidle, not strictly ?sid= — be tolerant)
+    await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
+    await page.waitForLoadState("networkidle", { timeout: 15000 }).catch(() => {});
     const finalUrl = page.url();
-    console.log(`[FAFA] results page: ${finalUrl}`);
+    console.log(`[FAFA] after submit URL: ${finalUrl}`);
+
     const items = await extractItems(page);
     console.log(`[FAFA] extractItems: ${items.length} items`);
     items.slice(0, 5).forEach((it, i) =>
