@@ -17,4 +17,7 @@
     "openai": "^6.34.0",
     "@supabase/supabase-js": "^2.103.3",
     "express": "^4.21.0",
-    "dotenv": "
+    "dotenv": "^16.4.7",
+    "playwright": "^1.44.0"
+  }
+}
