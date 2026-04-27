@@ -4,6 +4,9 @@
   "description": "Telegram bot for cargo transportation lead collection",
   "main": "src/index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
@@ -14,7 +17,4 @@
     "openai": "^6.34.0",
     "@supabase/supabase-js": "^2.103.3",
     "express": "^4.21.0",
-    "dotenv": "^16.4.7",
-    "playwright": "^1.44.0"
-  }
-}
+    "dotenv": "

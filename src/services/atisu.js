@@ -180,7 +180,7 @@ export async function scrapeAtisu(filters) {
     }
 
     console.log("[ATISU] no API response captured, falling back to DOM...");
-    return extractItemsDom(page);
+    return await extractItemsDom(page);
 
   } finally {
     await browser.close();
@@ -378,12 +378,13 @@ async function fillSearchForm(page, filters) {
 }
 
 async function extractItemsDom(page) {
-  await page.waitForFunction(
-    () => document.body.innerText.includes("Найдено"),
-    { timeout: 5000 }
-  ).catch(() => {});
+  try {
+    await page.waitForFunction(
+      () => document.body.innerText.includes("Найдено"),
+      { timeout: 5000 }
+    ).catch(() => {});
 
-  const result = await page.evaluate(() => {
+    const result = await page.evaluate(() => {
     const DATE_KW    = /готов|погрузка|апр|мар|фев|янв|май|июн|июл|авг|сен|окт|ноя|дек/i;
     const CARD_START = /^(изм|доб)\s+\d/i;
     const CITY_RE    = /^[А-ЯЁ][а-яё]/;
@@ -477,9 +478,13 @@ async function extractItemsDom(page) {
     };
   });
 
-  console.log(`[ATISU] DOM fallback: ${result.items?.length} items, cards=${result.debug?.cards}`);
-  if (result.debug?.afterSample?.length) {
-    console.log(`[ATISU] afterLeafs sample:`, JSON.stringify(result.debug.afterSample));
+    console.log(`[ATISU] DOM fallback: ${result.items?.length} items, cards=${result.debug?.cards}`);
+    if (result.debug?.afterSample?.length) {
+      console.log(`[ATISU] afterLeafs sample:`, JSON.stringify(result.debug.afterSample));
+    }
+    return result.items || [];
+  } catch (e) {
+    console.log(`[ATISU] extractItemsDom error (page may be closed): ${e.message}`);
+    return [];
   }
-  return result.items || [];
 }
