@@ -376,23 +376,25 @@ async function _scrapeFafa(filters) {
     });
     const page = await context.newPage();
 
-    await page.goto(FAFA_URL, { waitUntil: "domcontentloaded", timeout: 30000 });
-    await rand(1500, 2500);
-
-    // Login is optional — FA-FA.KZ shows search results to anonymous users too.
-    // Try to log in only if credentials are present; never let login failure block search.
-    if (process.env.FAFA_LOGIN && process.env.FAFA_PASSWORD) {
-      const hasAuth = await page.$(".user-info, .profile-link, [href*='logout'], [href*='exit'], .lk-link").catch(() => null);
-      if (!hasAuth) {
-        try { await doLogin(page); }
-        catch (e) { console.log(`[FAFA] login failed, continuing anonymously: ${e.message}`); }
-      }
-    } else {
-      console.log("[FAFA] no FAFA_LOGIN credentials — searching anonymously");
-    }
-
+    // Go to search page directly — it will show login form if not authenticated
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
     await rand(1500, 2000);
+
+    // Check if login form is visible (indicates we're not authenticated)
+    const hasLoginForm = await page.$("input[name='login'], input[name='pass1']").catch(() => null);
+    if (hasLoginForm && process.env.FAFA_LOGIN && process.env.FAFA_PASSWORD) {
+      try {
+        await doLogin(page);
+        console.log("[FAFA] login successful");
+      }
+      catch (e) {
+        console.log(`[FAFA] login failed, continuing anyway: ${e.message}`);
+      }
+    } else if (hasLoginForm) {
+      console.log("[FAFA] login form present but no credentials — searching anonymously");
+    } else {
+      console.log("[FAFA] already authenticated or no login form detected");
+    }
 
     await fillSearchForm(page, filters);
 
@@ -535,44 +537,54 @@ async function doLogin(page) {
   const password = process.env.FAFA_PASSWORD;
   if (!login || !password) throw new Error("FAFA_LOGIN / FAFA_PASSWORD env vars missing");
 
-  console.log(`[FAFA] login start, URL: ${page.url()}`);
+  console.log(`[FAFA] login start, URL: ${page.url()}, login: ${login}`);
 
-  const loginLink = await page.$("a[href*='login'], a[href*='signin'], a[href*='enter'], .login-btn, .btn-login").catch(() => null);
-  if (loginLink) {
-    await page.evaluate(el => el.click(), loginLink);
-    await rand(1000, 1500);
+  // Use Playwright's native fill methods (more reliable than manual event dispatch)
+  const loginInput = page.locator("input[name='login']");
+  const passInput = page.locator("input[name='pass1']");
+
+  try {
+    await loginInput.waitFor({ timeout: 5000 });
+    await loginInput.fill(login);
+    console.log("[FAFA] login field filled");
+  } catch (e) {
+    throw new Error(`Login input not found: ${e.message}`);
   }
 
-  await page.evaluate(({ l, p }) => {
-    const fire = (el, val) => {
-      el.focus(); el.value = val;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-    };
-    const loginInput = document.querySelector("input[name='login']");
-    const passInput = document.querySelector("input[name='pass1'], input[type='password'], input[name='password']");
-    if (loginInput) fire(loginInput, l);
-    if (passInput) fire(passInput, p);
-  }, { l: login, p: password });
+  try {
+    await passInput.waitFor({ timeout: 5000 });
+    await passInput.fill(password);
+    console.log("[FAFA] password field filled");
+  } catch (e) {
+    throw new Error(`Password input not found: ${e.message}`);
+  }
 
-  await rand(800, 1200);
+  await rand(500, 800);
 
-  const submitted = await page.evaluate(() => {
-    const sbm = document.querySelector("input[name='sbm']");
-    if (sbm) { sbm.click(); return "input[name=sbm].click()"; }
-    const passInput = document.querySelector("input[name='pass1'], input[type='password']");
-    if (passInput?.form) { passInput.form.submit(); return "passInput.form.submit()"; }
-    return null;
-  });
-  console.log(`[FAFA] submit method: ${submitted}`);
+  // Submit form by clicking the submit button
+  const submitBtn = page.locator("input[name='sbm']");
+  try {
+    await submitBtn.waitFor({ timeout: 3000 });
+    await submitBtn.click();
+    console.log("[FAFA] submit button clicked");
+  } catch (e) {
+    throw new Error(`Submit button not found: ${e.message}`);
+  }
 
-  await page.waitForLoadState("domcontentloaded", { timeout: 15000 }).catch(() => {});
-  await rand(2000, 3000);
+  // Wait for page to load after login
+  await Promise.race([
+    page.waitForNavigation({ timeout: 10000 }).catch(() => {}),
+    page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {}),
+  ]);
+  await rand(1000, 2000);
 
   const afterUrl = page.url();
   console.log(`[FAFA] login done, URL: ${afterUrl}`);
-  if (afterUrl.includes("/login")) {
-    throw new Error("Login failed — redirected back to login page. Check credentials.");
+
+  // Check if we got an error message on the page
+  const errorMsg = await page.locator("body").innerText().catch(() => "");
+  if (errorMsg.includes("неправильный") || errorMsg.includes("ошибк") || afterUrl.includes("/login")) {
+    throw new Error("Login failed — credentials rejected or still on login page");
   }
 }
 
