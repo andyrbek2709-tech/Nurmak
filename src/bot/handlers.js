@@ -149,20 +149,35 @@ async function handleCallback(ctx) {
         const isActive = await isMonitoringActive(chatId);
         await ctx.editMessageText(await buildFilterText(chatId), { reply_markup: buildFilterKeyboard(isActive) });
       } else if (field === "search") {
-        await ctx.answerCbQuery("Ищу...");
-        await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
-        runOnce(chatId).then(async (items) => {
+        await ctx.answerCbQuery();
+        const statusMsg = await ctx.reply("🔄 Ищу на FA-FA.KZ и ATI.SU...\nРезультаты скоро...");
+        try {
+          const items = await runOnce(chatId);
+
+          // Edit status message
+          await ctx.telegram.editMessageText(
+            chatId,
+            statusMsg.message_id,
+            null,
+            `✅ Поиск завершён (найдено ${items.length})`
+          ).catch(() => {});
+
           if (!items.length) {
-            await ctx.telegram.sendMessage(chatId, "По вашим фильтрам ничего не найдено.");
+            await ctx.reply("По вашим фильтрам ничего не найдено.");
             return;
           }
+
           for (const item of items) {
             await ctx.telegram.sendMessage(chatId, buildMessage(item)).catch(() => {});
           }
-          await ctx.telegram.sendMessage(chatId, `✅ Найдено ${items.length} заявок.`);
-        }).catch(async (err) => {
-          await ctx.telegram.sendMessage(chatId, `❌ Ошибка поиска: ${err.message}`).catch(() => {});
-        });
+        } catch (err) {
+          await ctx.telegram.editMessageText(
+            chatId,
+            statusMsg.message_id,
+            null,
+            `❌ Ошибка поиска: ${err.message}`
+          ).catch(() => {});
+        }
       } else if (field === "monitor") {
         const isActive = await isMonitoringActive(chatId);
         if (isActive) {
@@ -489,16 +504,34 @@ async function handleStop(ctx) {
 
 async function handleSearchOnce(ctx) {
   const chatId = String(ctx.chat.id);
-  await ctx.reply("🔍 Запускаю поиск по текущим фильтрам...");
+  const statusMsg = await ctx.reply("🔄 Ищу на FA-FA.KZ и ATI.SU...\nРезультаты скоро...");
   try {
     const items = await runOnce(chatId);
-    if (!items.length) { await ctx.reply("По вашим фильтрам ничего не найдено."); return; }
+
+    // Edit status message when done
+    await ctx.telegram.editMessageText(
+      chatId,
+      statusMsg.message_id,
+      null,
+      `✅ Поиск завершён (найдено ${items.length})`
+    ).catch(() => {});
+
+    if (!items.length) {
+      await ctx.reply("По вашим фильтрам ничего не найдено.");
+      return;
+    }
+
     for (const item of items) {
       await ctx.reply(buildMessage(item));
     }
-    await ctx.reply(`✅ Найдено ${items.length} заявок.`);
   } catch (err) {
-    await ctx.reply(`❌ Ошибка: ${err.message}`);
+    // Edit status message with error
+    await ctx.telegram.editMessageText(
+      chatId,
+      statusMsg.message_id,
+      null,
+      `❌ Ошибка поиска: ${err.message}`
+    ).catch(() => {});
   }
 }
 
