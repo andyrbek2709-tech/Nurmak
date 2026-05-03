@@ -419,88 +419,37 @@ async function fillSearchForm(page, filters) {
   console.log(`[FAFA] fillSearchForm: from="${filters.from}" to="${filters.to}"`);
 
   const typeAndPickSuggestion = async (inputId, value) => {
-    await page.evaluate(() => {
-      document.querySelectorAll('[class*="csr-"]').forEach(el => el.remove());
-    });
-
-    await page.evaluate(({ id, v }) => {
-      const inp = document.getElementById(id);
-      if (!inp) return;
-      inp.focus();
-      inp.value = v;
-      inp.dispatchEvent(new Event("input",  { bubbles: true }));
-      inp.dispatchEvent(new Event("keyup",  { bubbles: true }));
-      inp.dispatchEvent(new Event("change", { bubbles: true }));
-    }, { id: inputId, v: value });
+    // Use Playwright's native fill method (simulates actual typing, triggers events properly)
+    const input = page.locator(`#${inputId}`);
 
     try {
-      await page.waitForSelector("div.av1", { timeout: 6000 });
-    } catch (_) {
-      console.log(`[FAFA] #${inputId}: no div.av1 for "${value}"`);
+      await input.waitFor({ timeout: 3000 });
+      await input.fill("");  // Clear first
+      await input.fill(value);  // Fill with proper event simulation
+      console.log(`[FAFA] filled #${inputId}: "${value}"`);
+    } catch (e) {
+      console.log(`[FAFA] #${inputId}: ERROR - ${e.message}`);
       return null;
     }
 
-    const av1List = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("div.av1")).slice(0, 5).map(d => ({
-        text: d.textContent.trim(),
-        visible: !!d.offsetParent,
-        attrs: Array.from(d.attributes).map(a => `${a.name}=${a.value}`).join("; "),
-      }))
-    );
+    // Wait briefly for any autocomplete to appear (optional)
+    await rand(300, 700);
 
-    const visibleAv1 = av1List.find(d => d.visible);
-    if (!visibleAv1) {
-      console.log(`[FAFA] #${inputId}: no visible div.av1`);
-      return null;
-    }
-
-    const picked = visibleAv1.text;
-
+    // Try to click autocomplete if it appears, but don't fail if it doesn't
     try {
-      await page.locator("div.av1").filter({ hasText: picked.slice(0, 10) }).first().click({ timeout: 3000 });
-    } catch (_) {
-      await page.evaluate(() => {
-        const div = Array.from(document.querySelectorAll("div.av1")).find(d => d.offsetParent);
-        if (div) {
-          div.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-          div.dispatchEvent(new MouseEvent("mouseup",   { bubbles: true }));
-          div.dispatchEvent(new MouseEvent("click",     { bubbles: true }));
-        }
-      });
-    }
-
-    await rand(500, 700);
-
-    const fieldName = inputId === "search1" ? "City[1]" : "city_end";
-    const hiddenAfter = await page.evaluate(() =>
-      Array.from(document.querySelectorAll("input")).map(el => ({ n: el.name, v: el.value }))
-    );
-    const citySet = hiddenAfter.some(f => f.n === fieldName && f.v);
-    if (!citySet) {
-      const onclickAttr = visibleAv1.attrs.match(/onclick=([^;]+)/)?.[1] || "";
-      const dataIdMatch = visibleAv1.attrs.match(/data-id=(\d+)/);
-      const onclickIdMatch = onclickAttr.match(/\d+/);
-      const cityId = dataIdMatch?.[1] || onclickIdMatch?.[0] || null;
-      if (cityId) {
-        await page.evaluate(({ name, val }) => {
-          let inp = document.querySelector(`input[name="${name}"]`);
-          if (!inp) {
-            inp = document.createElement("input");
-            inp.type = "hidden"; inp.name = name;
-            const form = document.querySelector("form");
-            if (form) form.appendChild(inp);
-          }
-          inp.value = val;
-        }, { name: fieldName, val: cityId });
-        console.log(`[FAFA] #${inputId}: manually set ${fieldName}=${cityId}`);
+      const av1 = await page.$("div.av1").catch(() => null);
+      if (av1) {
+        await page.locator("div.av1").first().click({ timeout: 2000 }).catch(() => {});
+        console.log(`[FAFA] #${inputId}: clicked autocomplete suggestion`);
+        await rand(300, 500);
       } else {
-        console.log(`[FAFA] #${inputId}: WARNING — ${fieldName} not set, onclick="${onclickAttr}"`);
+        console.log(`[FAFA] #${inputId}: no autocomplete, proceeding with text value`);
       }
+    } catch (_) {
+      console.log(`[FAFA] #${inputId}: autocomplete click failed, continuing anyway`);
     }
 
-    console.log(`[FAFA] #${inputId} picked: "${picked}"`);
-    await rand(300, 500);
-    return picked;
+    return value;
   };
 
   // FA-FA.KZ accepts plain text in both fields (city or country) — no need to skip countries.
