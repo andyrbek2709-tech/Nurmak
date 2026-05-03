@@ -14,6 +14,10 @@ let _bot = null;
 // Per-user state: chatId → { filters, seenKeys, isRunning, monitorTimer }
 const users = new Map();
 
+// Health check state
+let consecutiveZeroResults = 0;
+const ZERO_RESULTS_ALERT_THRESHOLD = 2; // Alert after 2 consecutive zero results
+
 function emptyFilters() {
   return { from: null, to: null, truck_type: null, weight: null, volume: null };
 }
@@ -332,13 +336,15 @@ async function scrape(fafaFilters, atisuFilters) {
 
 async function scrapeInternal(fafaFilters, atisuFilters) {
   const items = [];
+  const timestamp = new Date().toISOString();
 
   // Run sequentially to avoid launching two Chromium instances simultaneously (OOM risk)
   try {
     const fafaItems = await scrapeFafa(fafaFilters);
     items.push(...fafaItems.map(i => ({ ...i, source: "fafa" })));
+    console.log(`[${timestamp}] [SCRAPE_SUMMARY] FA-FA.KZ: ${fafaItems.length} items | filters:`, JSON.stringify(fafaFilters));
   } catch (err) {
-    console.error("[SCRAPE] fafa error:", err.message);
+    console.error(`[${timestamp}] [SCRAPE] fafa error:`, err.message);
   }
 
   try {
@@ -347,10 +353,20 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
     );
     const atisuItems = await Promise.race([scrapeAtisu(atisuFilters), timeout]);
     items.push(...atisuItems.map(i => ({ ...i, source: "atisu" })));
+    console.log(`[${timestamp}] [SCRAPE_SUMMARY] ATI.SU: ${atisuItems.length} items | filters:`, JSON.stringify(atisuFilters));
   } catch (err) {
-    console.error("[SCRAPE] atisu error:", err.message);
+    console.error(`[${timestamp}] [SCRAPE] atisu error:`, err.message);
   }
 
+  // Track zero results for health check
+  if (items.length === 0) {
+    consecutiveZeroResults++;
+    console.warn(`[${timestamp}] [HEALTH] Zero items returned. Consecutive: ${consecutiveZeroResults}`);
+  } else {
+    consecutiveZeroResults = 0;
+  }
+
+  console.log(`[${timestamp}] [SCRAPE_SUMMARY] Total: ${items.length} items (${items.filter(i => i.source === "fafa").length} FA-FA + ${items.filter(i => i.source === "atisu").length} ATI.SU)`);
   return items;
 }
 
@@ -608,4 +624,43 @@ async function extractItems(page) {
       return true;
     });
   });
+}
+
+// ─── Health Check ──────────────────────────────────────────────────────────────
+
+export async function startHealthCheck(bot, managerId) {
+  // Run health check every 60 minutes
+  const interval = setInterval(async () => {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [HEALTH_CHECK] Starting health check...`);
+
+    try {
+      // Test with known stable filters: Актау (Kazakhstan) → Москва (Russia)
+      const testFilters = { from: "Актау", to: "Москва", truck_type: null, weight: null, volume: null };
+      const items = await scrape(testFilters, testFilters);
+
+      if (items.length === 0) {
+        consecutiveZeroResults++;
+        console.warn(`[${timestamp}] [HEALTH_CHECK] FAILED: Zero items. Consecutive: ${consecutiveZeroResults}`);
+
+        // Alert manager if threshold reached
+        if (consecutiveZeroResults === ZERO_RESULTS_ALERT_THRESHOLD) {
+          const msg = `⚠️ <b>Scraper Health Alert</b>\n\nHealth check failed 2 times in a row. Both FA-FA.KZ and ATI.SU returning 0 results on test query.\n\n<code>Filters: ${JSON.stringify(testFilters)}</code>\n\n⏰ Check logs at Railway dashboard.`;
+          try {
+            await bot.telegram.sendMessage(managerId, msg, { parse_mode: "HTML" });
+          } catch (e) {
+            console.error(`[${timestamp}] [HEALTH_CHECK] Failed to send alert:`, e.message);
+          }
+        }
+      } else {
+        consecutiveZeroResults = 0;
+        console.log(`[${timestamp}] [HEALTH_CHECK] OK: ${items.length} items found`);
+      }
+    } catch (err) {
+      console.error(`[${timestamp}] [HEALTH_CHECK] Error during health check:`, err.message);
+    }
+  }, 60 * 60 * 1000); // 60 minutes
+
+  // Graceful shutdown
+  process.on("exit", () => clearInterval(interval));
 }

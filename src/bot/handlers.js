@@ -2,7 +2,7 @@ import {
   updateLeadStatus, getLeadById,
   getLeadsByStatus, getLeadsToday,
 } from "../services/supabase.js";
-import { initFafa, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters, runOnce, buildMessage } from "../services/fafa.js";
+import { initFafa, startHealthCheck, startMonitoring, stopMonitoring, isMonitoringActive, getFilters, setFilter, clearFilters, runOnce, buildMessage } from "../services/fafa.js";
 
 const MANAGER_CHAT_ID = String(process.env.MANAGER_CHAT_ID);
 
@@ -18,6 +18,7 @@ export function registerHandlers(bot) {
   _bot = bot;
 
   initFafa(bot);
+  startHealthCheck(bot, MANAGER_CHAT_ID);
 
   bot.start(handleStart);
 
