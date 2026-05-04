@@ -436,15 +436,49 @@ async function _scrapeFafa(filters) {
     await rand(2000, 3000);
     console.log(`[FAFA] scraping URL: ${page.url()}, title: ${await page.title()}`);
 
-    const items = await extractItems(page);
+    let items = await extractItems(page);
     console.log(`[FAFA] extractItems: ${items.length} items`);
     items.slice(0, 5).forEach((it, i) =>
       console.log(`[FAFA] item[${i}]: from="${it.from}" to="${it.to}" truck="${it.truck_type}"`)
     );
+
+    // Retry once with shortened city tokens when users type "city + region" in one field
+    // (example: "Актау Мангистау, Казахстан"), which can produce blank=1 on FA-FA.
+    if (items.length === 0) {
+      const shortFrom = shortenCityToken(filters.from);
+      const shortTo = shortenCityToken(filters.to);
+      const shouldRetry =
+        (shortFrom && shortFrom !== filters.from?.split(",")[0]?.trim()) ||
+        (shortTo && shortTo !== filters.to?.split(",")[0]?.trim());
+
+      if (shouldRetry) {
+        const retryFilters = {
+          ...filters,
+          from: shortFrom ? `${shortFrom}, ` : filters.from,
+          to: shortTo ? `${shortTo}, ` : filters.to,
+        };
+        console.log(`[FAFA] retry with shortened terms: from="${shortFrom || "-"}" to="${shortTo || "-"}"`);
+        await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+        await rand(1000, 1500);
+        await fillSearchForm(page, retryFilters);
+        await rand(1500, 2500);
+        items = await extractItems(page);
+        console.log(`[FAFA] retry extractItems: ${items.length} items`);
+      }
+    }
+
     return items;
   } finally {
     await browser.close();
   }
+}
+
+function shortenCityToken(value) {
+  if (!value) return null;
+  const cityPart = value.split(",")[0].trim();
+  if (!cityPart || !cityPart.includes(" ")) return cityPart || null;
+  const first = cityPart.split(/\s+/)[0]?.trim();
+  return first || cityPart;
 }
 
 async function fillSearchForm(page, filters) {
