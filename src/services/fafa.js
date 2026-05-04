@@ -17,6 +17,9 @@ const users = new Map();
 // Health check state
 let consecutiveZeroResults = 0;
 const ZERO_RESULTS_ALERT_THRESHOLD = 2; // Alert after 2 consecutive zero results
+let consecutiveLaunchFailures = 0;
+let lastLaunchAlertAt = 0;
+const LAUNCH_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
 
 function emptyFilters() {
   return { from: null, to: null, truck_type: null, weight: null, volume: null };
@@ -347,6 +350,7 @@ async function scrape(fafaFilters, atisuFilters) {
 async function scrapeInternal(fafaFilters, atisuFilters) {
   const items = [];
   const timestamp = new Date().toISOString();
+  let launchFailureDetected = false;
 
   // Run sequentially to avoid launching two Chromium instances simultaneously (OOM risk)
   try {
@@ -355,6 +359,7 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
     console.log(`[${timestamp}] [SCRAPE_SUMMARY] FA-FA.KZ: ${fafaItems.length} items | filters:`, JSON.stringify(fafaFilters));
   } catch (err) {
     console.error(`[${timestamp}] [SCRAPE] fafa error:`, err.message);
+    if (String(err?.message || "").includes("browserType.launch")) launchFailureDetected = true;
   }
 
   try {
@@ -366,6 +371,24 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
     console.log(`[${timestamp}] [SCRAPE_SUMMARY] ATI.SU: ${atisuItems.length} items | filters:`, JSON.stringify(atisuFilters));
   } catch (err) {
     console.error(`[${timestamp}] [SCRAPE] atisu error:`, err.message);
+    if (String(err?.message || "").includes("browserType.launch")) launchFailureDetected = true;
+  }
+
+  if (launchFailureDetected) {
+    consecutiveLaunchFailures++;
+    const now = Date.now();
+    if (consecutiveLaunchFailures >= 2 && now - lastLaunchAlertAt > LAUNCH_ALERT_COOLDOWN_MS && _bot) {
+      lastLaunchAlertAt = now;
+      const managerId = String(process.env.MANAGER_CHAT_ID || "");
+      if (managerId) {
+        await _bot.telegram.sendMessage(
+          managerId,
+          "⚠️ Alert: Playwright browser launch failed repeatedly. Check Railway logs for SIGTRAP / browserType.launch errors."
+        ).catch(() => {});
+      }
+    }
+  } else {
+    consecutiveLaunchFailures = 0;
   }
 
   // Track zero results for health check
