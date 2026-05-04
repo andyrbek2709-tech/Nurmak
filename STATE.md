@@ -7,7 +7,7 @@
 - **Прод:** https://nurmak-production.up.railway.app/ — Railway проект `patient-sparkle / InstitutPro` (по факту: `789c93ee-6126-424c-9d1a-6c6ad113f637`)
 - **Стек:** Node.js (ESM), Telegraf, Playwright, OpenAI (GPT-4o-mini + Whisper), Supabase, Railway
 - **Репо:** `andyrbek2709-tech/Nurmak`, ветка `main`
-- **Последний рабочий коммит (origin/main):** `be32c2c` — возврат на `search_load` после FAFA login + понятный hourly-текст мониторинга.
+- **Последний рабочий коммит (origin/main):** `22166a8` — фикс Railway/Playwright (`channel: "chromium"`), чтобы скрейперы не падали на старте.
 - **Env (Railway):** `BOT_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `MANAGER_CHAT_ID`, `WEBHOOK_DOMAIN`, `FAFA_LOGIN`, `FAFA_PASSWORD`, `ATISU_LOGIN`, `ATISU_PASSWORD`
 - Команды: `/filter /search /monitor /stop /new /active /today /help`
 
@@ -21,6 +21,11 @@
 - [ ] (заполнится по мере работы)
 
 ## Последние изменения (новые сверху)
+
+### 2026-05-04 — ops: исправлена переменная Railway `FAFA_LOGIN` (удалён ключ с пробелом)
+- **Проблема:** в переменных окружения был ключ `FAFA_LOGIN ` (с пробелом в конце), поэтому приложение считало, что логин FA-FA отсутствует, и писало `login form present but no credentials`.
+- **Что сделано:** добавлен корректный `FAFA_LOGIN`, удалён ошибочный ключ `FAFA_LOGIN ` через Railway CLI.
+- **Результат:** логин FA-FA снова выполняется в проде (`[FAFA] login successful` в логах).
 
 ### 2026-05-04 — fix(playwright/railway): запуск Chromium через channel=chromium
 - **Проблема:** в прод-логах Railway массово падал `chromium_headless_shell` с `SIGTRAP` (`browserType.launch: Target page, context or browser has been closed`), из-за этого оба скрейпера (FA-FA и ATI) возвращали 0.
