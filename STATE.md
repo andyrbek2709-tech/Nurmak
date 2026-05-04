@@ -7,7 +7,7 @@
 - **Прод:** https://nurmak-production.up.railway.app/ — Railway проект `patient-sparkle / InstitutPro` (по факту: `789c93ee-6126-424c-9d1a-6c6ad113f637`)
 - **Стек:** Node.js (ESM), Telegraf, Playwright, OpenAI (GPT-4o-mini + Whisper), Supabase, Railway
 - **Репо:** `andyrbek2709-tech/Nurmak`, ветка `main`
-- **Последний рабочий коммит (origin/main на момент проверки):** `0d3025f` — UX статуса поиска; локально 2026-05-04 добавлены правки FAFA (после логина — `search_load`) и текст hourly-мониторинга (см. «Последние изменения»).
+- **Последний рабочий коммит (origin/main):** `be32c2c` — возврат на `search_load` после FAFA login + понятный hourly-текст мониторинга.
 - **Env (Railway):** `BOT_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `MANAGER_CHAT_ID`, `WEBHOOK_DOMAIN`, `FAFA_LOGIN`, `FAFA_PASSWORD`, `ATISU_LOGIN`, `ATISU_PASSWORD`
 - Команды: `/filter /search /monitor /stop /new /active /today /help`
 
@@ -21,6 +21,11 @@
 - [ ] (заполнится по мере работы)
 
 ## Последние изменения (новые сверху)
+
+### 2026-05-04 — fix(playwright/railway): запуск Chromium через channel=chromium
+- **Проблема:** в прод-логах Railway массово падал `chromium_headless_shell` с `SIGTRAP` (`browserType.launch: Target page, context or browser has been closed`), из-за этого оба скрейпера (FA-FA и ATI) возвращали 0.
+- **Что сделано:** в `src/services/fafa.js` и `src/services/atisu.js` в `chromium.launch(...)` добавлен `channel: "chromium"` (используем полный Chromium вместо headless_shell).
+- **Ожидаемый эффект:** браузер стабильно стартует на Railway, `/search` и мониторинг снова дают реальные результаты вместо постоянного нуля.
 
 ### 2026-05-04 — fix(fafa): после логина возврат на /search_load/ + мониторинг «нет новых» с диагностикой
 - **Проблема:** после `doLogin` FA-FA.KZ часто редиректит с `/search_load/` — форма `#search1`/`#search10` оказывается не на странице → пустая выдача; плюс пользователи путают почасовое «нет новых» с поломкой скрейпера.
