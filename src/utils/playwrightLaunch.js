@@ -21,13 +21,17 @@ export async function launchChromiumForScrape() {
   let lastErr;
   for (let attempt = 1; attempt <= LAUNCH_RETRIES; attempt++) {
     try {
+      const preferFullChromium = attempt < LAUNCH_RETRIES;
       const browser = await chromium.launch({
-        channel: "chromium",
+        ...(preferFullChromium ? { channel: "chromium" } : {}),
         headless: true,
         chromiumSandbox: false,
         args: CHROMIUM_ARGS,
       });
-      if (attempt > 1) console.log(`[PLAYWRIGHT] chromium.launch ok on attempt ${attempt}`);
+      if (attempt > 1) {
+        const mode = preferFullChromium ? "channel=chromium" : "bundled fallback";
+        console.log(`[PLAYWRIGHT] chromium.launch ok on attempt ${attempt} (${mode})`);
+      }
       return browser;
     } catch (e) {
       lastErr = e;
