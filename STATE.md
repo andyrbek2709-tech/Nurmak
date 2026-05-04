@@ -22,6 +22,11 @@
 
 ## Последние изменения (новые сверху)
 
+### 2026-05-04 — fix(playwright/railway): install `--no-shell`, ретраи launch, общий launch helper
+- **Проблема:** после фикса `channel: "chromium"` мониторинг снова словил алерт про повторные `browserType.launch` / SIGTRAP; в 21:44 тех. сводка дала 0+0 (браузер не поднимался).
+- **Что сделано:** `postinstall` → `playwright install --with-deps --no-shell chromium` (по доке Playwright — под полный Chromium для new headless, без лишнего headless_shell); вынесен `src/utils/playwrightLaunch.js` — `launchChromiumForScrape()` с 3 попытками и паузой, `chromiumSandbox: false`, доп. флаги `--disable-gpu` / `--disable-software-rasterizer` / `--disable-extensions`; `fafa.js` / `atisu.js` используют helper; расширена детекция `isPlaywrightBrowserFailure` для счётчика алертов (SIGTRAP, «browser closed», headless_shell и т.д.).
+- **Ожидаемый эффект:** меньше ложных/хрупких инсталлов на Railway, пережатие кратковременных сбоев старта, корректнее эскалация в Telegram.
+
 ### 2026-05-04 — hardening: fail-fast по env + alert на повторные падения browser launch
 - **Проблема:** повторяющиеся инциденты из-за конфигурации (`FAFA_LOGIN ` с пробелом) и тихие падения Playwright launch в проде.
 - **Что сделано:** в `src/index.js` обязательными сделаны `FAFA_*` и `ATISU_*`; добавлена проверка env-ключей на пробелы по краям с аварийным `process.exit(1)`; в `src/services/fafa.js` добавлен счётчик повторных `browserType.launch` ошибок и алерт менеджеру при серии с cooldown.

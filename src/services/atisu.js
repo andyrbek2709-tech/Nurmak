@@ -1,5 +1,5 @@
-import { chromium } from "playwright";
 import { rand } from "../utils/timing.js";
+import { launchChromiumForScrape } from "../utils/playwrightLaunch.js";
 import { existsSync } from "fs";
 
 const LOGIN_URL   = "https://id.ati.su";
@@ -100,11 +100,7 @@ function parseApiItem(it) {
 }
 
 export async function scrapeAtisu(filters) {
-  const browser = await chromium.launch({
-    channel: "chromium",
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+  const browser = await launchChromiumForScrape();
 
   try {
     const contextOpts = {

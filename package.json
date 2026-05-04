@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "postinstall": "playwright install --with-deps chromium"
+    "postinstall": "playwright install --with-deps --no-shell chromium"
   },
   "dependencies": {
     "telegraf": "^4.16.3",

@@ -1,5 +1,5 @@
-import { chromium } from "playwright";
 import { loadBotSetting, saveBotSetting } from "./supabase.js";
+import { launchChromiumForScrape, isPlaywrightBrowserFailure } from "../utils/playwrightLaunch.js";
 import { scrapeAtisu } from "./atisu.js";
 import { delay, rand } from "../utils/timing.js";
 import { trackEvent } from "./controlTower.js";
@@ -359,7 +359,7 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
     console.log(`[${timestamp}] [SCRAPE_SUMMARY] FA-FA.KZ: ${fafaItems.length} items | filters:`, JSON.stringify(fafaFilters));
   } catch (err) {
     console.error(`[${timestamp}] [SCRAPE] fafa error:`, err.message);
-    if (String(err?.message || "").includes("browserType.launch")) launchFailureDetected = true;
+    if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
   }
 
   try {
@@ -371,7 +371,7 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
     console.log(`[${timestamp}] [SCRAPE_SUMMARY] ATI.SU: ${atisuItems.length} items | filters:`, JSON.stringify(atisuFilters));
   } catch (err) {
     console.error(`[${timestamp}] [SCRAPE] atisu error:`, err.message);
-    if (String(err?.message || "").includes("browserType.launch")) launchFailureDetected = true;
+    if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
   }
 
   if (launchFailureDetected) {
@@ -412,11 +412,7 @@ async function scrapeFafa(filters) {
 }
 
 async function _scrapeFafa(filters) {
-  const browser = await chromium.launch({
-    channel: "chromium",
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  });
+  const browser = await launchChromiumForScrape();
 
   try {
     const context = await browser.newContext({
