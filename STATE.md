@@ -7,7 +7,7 @@
 - **Прод:** https://nurmak-production.up.railway.app/ — Railway проект `patient-sparkle / InstitutPro` (по факту: `789c93ee-6126-424c-9d1a-6c6ad113f637`)
 - **Стек:** Node.js (ESM), Telegraf, Playwright, OpenAI (GPT-4o-mini + Whisper), Supabase, Railway
 - **Репо:** `andyrbek2709-tech/Nurmak`, ветка `main`
-- **Последний рабочий коммит (origin/main):** `22166a8` — фикс Railway/Playwright (`channel: "chromium"`), чтобы скрейперы не падали на старте.
+- **Последний рабочий коммит (origin/main):** `8765730` — Playwright на Railway: `--no-shell` в postinstall, ретраи launch, общий `playwrightLaunch.js`.
 - **Env (Railway):** `BOT_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `MANAGER_CHAT_ID`, `WEBHOOK_DOMAIN`, `FAFA_LOGIN`, `FAFA_PASSWORD`, `ATISU_LOGIN`, `ATISU_PASSWORD`
 - Команды: `/filter /search /monitor /stop /new /active /today /help`
 
