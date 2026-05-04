@@ -7,7 +7,7 @@
 - **Прод:** https://nurmak-production.up.railway.app/ — Railway проект `patient-sparkle / InstitutPro` (по факту: `789c93ee-6126-424c-9d1a-6c6ad113f637`)
 - **Стек:** Node.js (ESM), Telegraf, Playwright, OpenAI (GPT-4o-mini + Whisper), Supabase, Railway
 - **Репо:** `andyrbek2709-tech/Nurmak`, ветка `main`
-- **Последний рабочий коммит:** `814aa33` — fix: restore truncated package.json (Railway nixpacks build was failing) (2026-04-27 08:01:21)
+- **Последний рабочий коммит (origin/main на момент проверки):** `0d3025f` — UX статуса поиска; локально 2026-05-04 добавлены правки FAFA (после логина — `search_load`) и текст hourly-мониторинга (см. «Последние изменения»).
 - **Env (Railway):** `BOT_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `MANAGER_CHAT_ID`, `WEBHOOK_DOMAIN`, `FAFA_LOGIN`, `FAFA_PASSWORD`, `ATISU_LOGIN`, `ATISU_PASSWORD`
 - Команды: `/filter /search /monitor /stop /new /active /today /help`
 
@@ -21,6 +21,10 @@
 - [ ] (заполнится по мере работы)
 
 ## Последние изменения (новые сверху)
+
+### 2026-05-04 — fix(fafa): после логина возврат на /search_load/ + мониторинг «нет новых» с диагностикой
+- **Проблема:** после `doLogin` FA-FA.KZ часто редиректит с `/search_load/` — форма `#search1`/`#search10` оказывается не на странице → пустая выдача; плюс пользователи путают почасовое «нет новых» с поломкой скрейпера.
+- **Что сделано:** при успешном логине, если URL не `search_load`, снова `goto(SEARCH_URL)`; при ошибке логина при заданных `FAFA_*` — не продолжать анонимный поиск по FA-FA (вернуть `[]`); текст hourly-сообщения с пояснением + счётчики FA-FA/ATI; лог `tick … scraped/fresh/matched`; заголовок карточки `Новое направление (сайт)` без лишнего переноса.
 
 ### 2026-04-27 18:42 — chore: добавлен STATE.md (память проекта)
 - **Что:** введён единый протокол памяти через STATE.md в репо. Любая сессия Claude (Cowork, Sonnet code chat, Claude Code, claude.ai) теперь читает этот файл первым делом и обновляет после каждого значимого изменения.

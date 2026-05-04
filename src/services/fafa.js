@@ -284,10 +284,20 @@ async function tick(chatId) {
       console.log(`[FAFA] sent ${matched.length} notifications to ${chatId}`);
     } else if (Date.now() - u.lastNoResultsAt >= NO_RESULTS_NOTIFY_MS) {
       u.lastNoResultsAt = Date.now();
-      await _bot.telegram.sendMessage(chatId, "🔍 Новых результатов нет").catch(e =>
+      const fafaN = items.filter(i => i.source === "fafa").length;
+      const atisuN = items.filter(i => i.source === "atisu").length;
+      const msg =
+        "🔍 За последний час новых объявлений по вашим фильтрам не появилось.\n\n" +
+        "Мониторинг активен: проверка каждые 5 минут — как только появится новое, пришлю сразу.\n\n" +
+        `(тех. сводка: с сайтов пришло ${items.length} строк выдачи, новых для вас — 0; FA-FA.KZ ${fafaN}, ATI.SU ${atisuN})`;
+      await _bot.telegram.sendMessage(chatId, msg).catch(e =>
         console.error("[FAFA] sendMessage error:", e.message)
       );
     }
+
+    console.log(
+      `[FAFA] tick ${chatId} scraped=${items.length} fresh=${freshWithKeys.length} matched=${matched.length}`
+    );
   } catch (err) {
     console.error("[FAFA] tick error:", err.message);
   }
@@ -304,7 +314,7 @@ async function notify(item, chatId, isNew = false) {
 
 export function buildMessage(item, opts = {}) {
   const site = item.source === "atisu" ? "ATI.SU" : "FA-FA.KZ";
-  const header = opts.isNew ? `🆕 Новое направление (\n\t${site})` : ` —🚛 Заявка ${site}`;
+  const header = opts.isNew ? `🆕 Новое направление (${site})` : ` —🚛 Заявка ${site}`;
   const distPart = item.distance ? ` (${item.distance})` : "";
   return [
     header,
@@ -396,20 +406,28 @@ async function _scrapeFafa(filters) {
     await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
     await rand(1500, 2000);
 
-    // Check if login form is visible (indicates we're not authenticated)
+    // If login form is present we are not authenticated (each scrape uses a fresh browser context).
     const hasLoginForm = await page.$("input[name='login'], input[name='pass1']").catch(() => null);
-    if (hasLoginForm && process.env.FAFA_LOGIN && process.env.FAFA_PASSWORD) {
+    const hasFafaCreds = !!(process.env.FAFA_LOGIN && process.env.FAFA_PASSWORD);
+
+    if (hasLoginForm && hasFafaCreds) {
       try {
         await doLogin(page);
         console.log("[FAFA] login successful");
-      }
-      catch (e) {
-        console.log(`[FAFA] login failed, continuing anyway: ${e.message}`);
+        // Login often redirects away from /search_load/ — form fields #search1 / #search10 live only there.
+        if (!page.url().includes("/search_load")) {
+          await page.goto(SEARCH_URL, { waitUntil: "domcontentloaded", timeout: 20000 });
+          await rand(1500, 2000);
+          console.log(`[FAFA] returned to search after login: ${page.url()}`);
+        }
+      } catch (e) {
+        console.error(`[FAFA] login failed with credentials set — skipping FA-FA scrape: ${e.message}`);
+        return [];
       }
     } else if (hasLoginForm) {
       console.log("[FAFA] login form present but no credentials — searching anonymously");
     } else {
-      console.log("[FAFA] already authenticated or no login form detected");
+      console.log("[FAFA] no login form on search page — proceeding without auth step");
     }
 
     await fillSearchForm(page, filters);
