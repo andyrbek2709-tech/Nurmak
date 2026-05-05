@@ -14,23 +14,21 @@ const CHROMIUM_ARGS = [
 ];
 
 /**
- * Railway/Docker: use channel "chromium" (new headless = full browser, not headless_shell).
- * Retries soften transient OOM / brief allocator failures during launch.
+ * Docker image mcr.microsoft.com/playwright matches playwright npm version — use bundled
+ * Chromium only (no `channel:`) to avoid picking a wrong system binary. Retries soften
+ * transient OOM / allocator glitches on small Railway instances.
  */
 export async function launchChromiumForScrape() {
   let lastErr;
   for (let attempt = 1; attempt <= LAUNCH_RETRIES; attempt++) {
     try {
-      const preferFullChromium = attempt < LAUNCH_RETRIES;
       const browser = await chromium.launch({
-        ...(preferFullChromium ? { channel: "chromium" } : {}),
         headless: true,
         chromiumSandbox: false,
         args: CHROMIUM_ARGS,
       });
       if (attempt > 1) {
-        const mode = preferFullChromium ? "channel=chromium" : "bundled fallback";
-        console.log(`[PLAYWRIGHT] chromium.launch ok on attempt ${attempt} (${mode})`);
+        console.log(`[PLAYWRIGHT] chromium.launch ok on attempt ${attempt}`);
       }
       return browser;
     } catch (e) {
@@ -42,17 +40,19 @@ export async function launchChromiumForScrape() {
   throw lastErr;
 }
 
-/** True when the browser process failed to start or died in a launch-like way (for health alerts). */
+/** True when the browser process failed to start (not mid-page navigation teardown). */
 export function isPlaywrightBrowserFailure(err) {
   const s = String(err?.message || err || "");
   return (
     s.includes("browserType.launch") ||
+    s.includes("Failed to launch") ||
     s.includes("SIGTRAP") ||
-    s.includes("Target page, context or browser has been closed") ||
-    s.includes("Browser has been closed") ||
     s.includes("Chromium distribution") ||
     s.includes("Executable doesn't exist") ||
+    s.includes("spawn ENOENT") ||
+    s.includes("Browser executable") ||
     s.includes("chromium_headless_shell") ||
-    s.includes("Browser closed")
+    s.includes("looks like Playwright Test or Playwright was just installed") ||
+    s.includes("npx playwright install")
   );
 }

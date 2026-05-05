@@ -99,8 +99,9 @@ function parseApiItem(it) {
   };
 }
 
-export async function scrapeAtisu(filters) {
-  const browser = await launchChromiumForScrape();
+export async function scrapeAtisu(filters, sharedBrowser = null) {
+  const ownsBrowser = !sharedBrowser;
+  const browser = sharedBrowser || (await launchChromiumForScrape());
 
   try {
     const contextOpts = {
@@ -180,7 +181,7 @@ export async function scrapeAtisu(filters) {
     return await extractItemsDom(page);
 
   } finally {
-    await browser.close();
+    if (ownsBrowser) await browser.close().catch(() => {});
   }
 }
 

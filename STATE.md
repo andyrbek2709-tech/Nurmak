@@ -1,5 +1,7 @@
 ﻿# STATE вЂ” Nurmak Bot
 
+<!-- Latest ops note (ASCII): 2026-05-05 — Dockerfile: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD before npm ci; one Chromium per scrape (FAFA+ATI); launch helper without channel + narrower launch-failure detection; playwright pinned 1.59.1 = image tag. Deploy = push main. -->
+
 > Р–РёРІРѕР№ Р¶СѓСЂРЅР°Р». РћР±РЅРѕРІР»СЏРµС‚СЃСЏ РїСЂРё РєР°Р¶РґРѕРј Р·РЅР°С‡РёРјРѕРј РёР·РјРµРЅРµРЅРёРё. РСЃС‚РѕС‡РЅРёРє РїСЂР°РІРґС‹ РјРµР¶РґСѓ СЃРµСЃСЃРёСЏРјРё Claude.
 
 ## РўРµРєСѓС‰РµРµ СЃРѕСЃС‚РѕСЏРЅРёРµ

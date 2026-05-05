@@ -347,33 +347,7 @@ async function scrape(fafaFilters, atisuFilters) {
   }
 }
 
-async function scrapeInternal(fafaFilters, atisuFilters) {
-  const items = [];
-  const timestamp = new Date().toISOString();
-  let launchFailureDetected = false;
-
-  // Run sequentially to avoid launching two Chromium instances simultaneously (OOM risk)
-  try {
-    const fafaItems = await scrapeFafa(fafaFilters);
-    items.push(...fafaItems.map(i => ({ ...i, source: "fafa" })));
-    console.log(`[${timestamp}] [SCRAPE_SUMMARY] FA-FA.KZ: ${fafaItems.length} items | filters:`, JSON.stringify(fafaFilters));
-  } catch (err) {
-    console.error(`[${timestamp}] [SCRAPE] fafa error:`, err.message);
-    if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
-  }
-
-  try {
-    const timeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("scrapeAtisu timeout 120s")), 120000)
-    );
-    const atisuItems = await Promise.race([scrapeAtisu(atisuFilters), timeout]);
-    items.push(...atisuItems.map(i => ({ ...i, source: "atisu" })));
-    console.log(`[${timestamp}] [SCRAPE_SUMMARY] ATI.SU: ${atisuItems.length} items | filters:`, JSON.stringify(atisuFilters));
-  } catch (err) {
-    console.error(`[${timestamp}] [SCRAPE] atisu error:`, err.message);
-    if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
-  }
-
+async function applyLaunchFailureTracking(launchFailureDetected) {
   if (launchFailureDetected) {
     consecutiveLaunchFailures++;
     const now = Date.now();
@@ -390,6 +364,57 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
   } else {
     consecutiveLaunchFailures = 0;
   }
+}
+
+async function scrapeInternal(fafaFilters, atisuFilters) {
+  const items = [];
+  const timestamp = new Date().toISOString();
+  let launchFailureDetected = false;
+
+  let browser = null;
+  try {
+    browser = await launchChromiumForScrape();
+  } catch (err) {
+    console.error(`[${timestamp}] [SCRAPE] chromium launch failed:`, err.message);
+    if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
+    await applyLaunchFailureTracking(launchFailureDetected);
+    if (items.length === 0) {
+      consecutiveZeroResults++;
+      console.warn(`[${timestamp}] [HEALTH] Zero items returned. Consecutive: ${consecutiveZeroResults}`);
+    } else {
+      consecutiveZeroResults = 0;
+    }
+    console.log(`[${timestamp}] [SCRAPE_SUMMARY] Total: 0 items (launch failed)`);
+    return [];
+  }
+
+  // One browser per cycle: halves RAM spikes vs FA-FA + ATI launching separately.
+  try {
+    try {
+      const fafaItems = await scrapeFafa(fafaFilters, browser);
+      items.push(...fafaItems.map(i => ({ ...i, source: "fafa" })));
+      console.log(`[${timestamp}] [SCRAPE_SUMMARY] FA-FA.KZ: ${fafaItems.length} items | filters:`, JSON.stringify(fafaFilters));
+    } catch (err) {
+      console.error(`[${timestamp}] [SCRAPE] fafa error:`, err.message);
+      if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
+    }
+
+    try {
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("scrapeAtisu timeout 120s")), 120000)
+      );
+      const atisuItems = await Promise.race([scrapeAtisu(atisuFilters, browser), timeout]);
+      items.push(...atisuItems.map(i => ({ ...i, source: "atisu" })));
+      console.log(`[${timestamp}] [SCRAPE_SUMMARY] ATI.SU: ${atisuItems.length} items | filters:`, JSON.stringify(atisuFilters));
+    } catch (err) {
+      console.error(`[${timestamp}] [SCRAPE] atisu error:`, err.message);
+      if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
+    }
+  } finally {
+    await browser.close().catch(() => {});
+  }
+
+  await applyLaunchFailureTracking(launchFailureDetected);
 
   // Track zero results for health check
   if (items.length === 0) {
@@ -403,16 +428,17 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
   return items;
 }
 
-async function scrapeFafa(filters) {
+async function scrapeFafa(filters, sharedBrowser = null) {
   // Hard 90s cap — protects the global mutex so ATI.SU always gets its turn
   const hardTimeout = new Promise((_, reject) =>
     setTimeout(() => reject(new Error("scrapeFafa hard timeout 90s")), 90000)
   );
-  return Promise.race([_scrapeFafa(filters), hardTimeout]);
+  return Promise.race([_scrapeFafa(filters, sharedBrowser), hardTimeout]);
 }
 
-async function _scrapeFafa(filters) {
-  const browser = await launchChromiumForScrape();
+async function _scrapeFafa(filters, sharedBrowser = null) {
+  const ownsBrowser = !sharedBrowser;
+  const browser = sharedBrowser || (await launchChromiumForScrape());
 
   try {
     const context = await browser.newContext({
@@ -488,7 +514,7 @@ async function _scrapeFafa(filters) {
 
     return items;
   } finally {
-    await browser.close();
+    if (ownsBrowser) await browser.close().catch(() => {});
   }
 }
 
