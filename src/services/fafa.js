@@ -20,6 +20,45 @@ const ZERO_RESULTS_ALERT_THRESHOLD = 2; // Alert after 2 consecutive zero result
 let consecutiveLaunchFailures = 0;
 let lastLaunchAlertAt = 0;
 const LAUNCH_ALERT_COOLDOWN_MS = 60 * 60 * 1000;
+let launchCircuitOpenUntil = 0;
+const SCRAPE_PHASE_TIMEOUTS_MS = {
+  launch: 30000,
+  fafa: 95000,
+  atisu: 125000,
+  total: 180000,
+};
+
+function launchJitterMs() {
+  return 15000 + Math.floor(Math.random() * 15000);
+}
+
+function classifyErr(err) {
+  const msg = String(err?.message || err || "");
+  if (msg.includes("timeout")) return "timeout";
+  if (isPlaywrightBrowserFailure(err)) return "browser_launch";
+  return "runtime";
+}
+
+async function runWithTimeout(name, ms, fn) {
+  const start = Date.now();
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`${name} timeout ${ms}ms`)), ms)
+  );
+  const value = await Promise.race([fn(), timeout]);
+  return { value, elapsedMs: Date.now() - start };
+}
+
+async function saveScrapeTelemetry(payload) {
+  const key = "scrape_telemetry_recent";
+  try {
+    const prevRaw = await loadBotSetting(key).catch(() => null);
+    const list = prevRaw ? JSON.parse(prevRaw) : [];
+    const next = [payload, ...(Array.isArray(list) ? list : [])].slice(0, 30);
+    await saveBotSetting(key, JSON.stringify(next));
+  } catch (err) {
+    console.error("[SCRAPE] telemetry save failed:", err.message);
+  }
+}
 
 function emptyFilters() {
   return { from: null, to: null, truck_type: null, weight: null, volume: null };
@@ -370,20 +409,38 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
   const items = [];
   const timestamp = new Date().toISOString();
   let launchFailureDetected = false;
+  const phases = {};
+  const startedAt = Date.now();
 
   let browser = null;
   try {
-    browser = await launchChromiumForScrape();
-  } catch (err) {
-    console.error(`[${timestamp}] [SCRAPE] chromium launch failed:`, err.message);
-    if (isPlaywrightBrowserFailure(err)) launchFailureDetected = true;
-    await applyLaunchFailureTracking(launchFailureDetected);
-    if (items.length === 0) {
-      consecutiveZeroResults++;
-      console.warn(`[${timestamp}] [HEALTH] Zero items returned. Consecutive: ${consecutiveZeroResults}`);
-    } else {
-      consecutiveZeroResults = 0;
+    if (Date.now() < launchCircuitOpenUntil) {
+      throw new Error(`launch circuit open until ${new Date(launchCircuitOpenUntil).toISOString()}`);
     }
+    const launchResult = await runWithTimeout("launch", SCRAPE_PHASE_TIMEOUTS_MS.launch, () => launchChromiumForScrape());
+    phases.launchMs = launchResult.elapsedMs;
+    browser = launchResult.value;
+  } catch (err) {
+    const cls = classifyErr(err);
+    console.error(`[${timestamp}] [SCRAPE] chromium launch failed (${cls}):`, err.message);
+    if (isPlaywrightBrowserFailure(err)) {
+      launchFailureDetected = true;
+      launchCircuitOpenUntil = Date.now() + launchJitterMs();
+    }
+    await applyLaunchFailureTracking(launchFailureDetected);
+    consecutiveZeroResults++;
+    console.warn(`[${timestamp}] [HEALTH] Zero items returned. Consecutive: ${consecutiveZeroResults}`);
+    await saveScrapeTelemetry({
+      ts: timestamp,
+      ok: false,
+      class: cls,
+      stage: "launch",
+      launchCircuitOpenUntil,
+      elapsedMs: Date.now() - startedAt,
+      fafaFilters,
+      atisuFilters,
+      err: String(err?.message || err || ""),
+    });
     console.log(`[${timestamp}] [SCRAPE_SUMMARY] Total: 0 items (launch failed)`);
     return [];
   }
@@ -391,7 +448,9 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
   // One browser per cycle: halves RAM spikes vs FA-FA + ATI launching separately.
   try {
     try {
-      const fafaItems = await scrapeFafa(fafaFilters, browser);
+      const fafaResult = await runWithTimeout("fafa", SCRAPE_PHASE_TIMEOUTS_MS.fafa, () => scrapeFafa(fafaFilters, browser));
+      const fafaItems = fafaResult.value;
+      phases.fafaMs = fafaResult.elapsedMs;
       items.push(...fafaItems.map(i => ({ ...i, source: "fafa" })));
       console.log(`[${timestamp}] [SCRAPE_SUMMARY] FA-FA.KZ: ${fafaItems.length} items | filters:`, JSON.stringify(fafaFilters));
     } catch (err) {
@@ -400,10 +459,9 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
     }
 
     try {
-      const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("scrapeAtisu timeout 120s")), 120000)
-      );
-      const atisuItems = await Promise.race([scrapeAtisu(atisuFilters, browser), timeout]);
+      const atisuResult = await runWithTimeout("atisu", SCRAPE_PHASE_TIMEOUTS_MS.atisu, () => scrapeAtisu(atisuFilters, browser));
+      const atisuItems = atisuResult.value;
+      phases.atisuMs = atisuResult.elapsedMs;
       items.push(...atisuItems.map(i => ({ ...i, source: "atisu" })));
       console.log(`[${timestamp}] [SCRAPE_SUMMARY] ATI.SU: ${atisuItems.length} items | filters:`, JSON.stringify(atisuFilters));
     } catch (err) {
@@ -423,6 +481,23 @@ async function scrapeInternal(fafaFilters, atisuFilters) {
   } else {
     consecutiveZeroResults = 0;
   }
+
+  const totalElapsedMs = Date.now() - startedAt;
+  if (totalElapsedMs > SCRAPE_PHASE_TIMEOUTS_MS.total) {
+    console.warn(`[${timestamp}] [SCRAPE] total cycle exceeded ${SCRAPE_PHASE_TIMEOUTS_MS.total}ms (${totalElapsedMs}ms)`);
+  }
+  await saveScrapeTelemetry({
+    ts: timestamp,
+    ok: true,
+    stage: "done",
+    elapsedMs: totalElapsedMs,
+    phases,
+    totals: {
+      all: items.length,
+      fafa: items.filter(i => i.source === "fafa").length,
+      atisu: items.filter(i => i.source === "atisu").length,
+    },
+  });
 
   console.log(`[${timestamp}] [SCRAPE_SUMMARY] Total: ${items.length} items (${items.filter(i => i.source === "fafa").length} FA-FA + ${items.filter(i => i.source === "atisu").length} ATI.SU)`);
   return items;
