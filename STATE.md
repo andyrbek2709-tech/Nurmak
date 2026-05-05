@@ -1,6 +1,46 @@
-﻿# STATE вЂ” Nurmak Bot
+﻿# STATE.md — Nurmak Bot (память проекта для людей и агентов)
 
-<!-- Latest ops note (ASCII): 2026-05-05 — Commit 2cb3456 — Dockerfile SKIP before npm ci; one Chromium per scrape; bundled launch only; narrower launch-alert detection; playwright 1.59.1 = image. -->
+> **Сначала читай блок ниже («Summary for AI agents»)** — там UTF-8, последние инциденты и фиксы. Остальной файл — история; часть строк в старом кодировочном виде.
+
+## Summary for AI agents / кратко для любого агента
+
+**Назначение файла:** единая память о проде, багах и последних правках. Приоритет при конфликте: **код в репо > этот файл**.
+
+### Продукт
+
+Telegram-бот: поиск грузов на **FA-FA.KZ** и **ATI.SU** (Playwright), OpenAI, Supabase, деплой **Railway** через **Dockerfile** (`railway.json` → builder DOCKERFILE). Репо: `andyrbek2709-tech/Nurmak`, ветка `main`. Подробные правила: `CLAUDE.md`.
+
+### Инцидент 2026-05: алерты Playwright / «browser launch failed» / SIGTRAP / 0 строк в мониторинге
+
+**Симптомы:** в Telegram у менеджера периодически «Playwright browser launch failed…»; у пользователей тех. сводка **FA-FA 0, ATI 0**; в логах Railway — `browserType.launch`, **SIGTRAP**, нестабильный Chromium.
+
+**Причины (классы), которые закрыли в коде:**
+
+| Проблема | Как проявлялась | Что сделали |
+|----------|-----------------|-------------|
+| Двойной Chromium в образе | `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` стоял **после** `npm ci` → во время `postinstall` тянулся второй браузер рядом с бинарниками `mcr.microsoft.com/playwright` → рассинхрон, падения | В `Dockerfile` переменная **до** `RUN npm ci` |
+| Два launch на один тик | Сначала FA-FA, потом ATI — **два** `chromium.launch` подряд → пик RAM на маленьком инстансе | Один запуск в `scrapeInternal`: общий `browser` в `scrapeFafa(..., browser)` и `scrapeAtisu(..., browser)`; закрытие снаружи |
+| Опция `channel` | Лишний путь к бинарнику при уже фиксированном Docker-образе | Убран `channel` из `launchChromiumForScrape()` — только bundled chromium под версию образа |
+| Ложные алерты менеджеру | В `isPlaywrightBrowserFailure` попадали строки про **«Target page, context or browser has been closed»** (часто mid-page, не launch) | Сузили детект до ошибок именно **bootstrap/executable** см. `src/utils/playwrightLaunch.js` |
+| Версии | Расхождение npm Playwright vs тег образа | `package.json`: `playwright` **зафиксирован на `1.59.1`**, Dockerfile: `FROM mcr.microsoft.com/playwright:v1.59.1-noble` |
+
+**Коммиты (ориентиры):** `2cb3456` — основной фикс; `d14bc05` — пометка в STATE; до этого связанный контекст `3cdeb42` (postinstall без `--with-deps`).
+
+**Файлы, которые трогали:** `Dockerfile`, `package.json`, `src/utils/playwrightLaunch.js`, `src/services/fafa.js` (`scrapeInternal`, `applyLaunchFailureTracking`, передача `sharedBrowser`), `src/services/atisu.js` (опциональный `sharedBrowser`, не закрывать чужой браузер).
+
+### Что всё ещё может ломаться (не «навсегда» без архитектуры)
+
+- **Мало RAM** на Railway — OOM, убийство процесса; лечится отдельным сервисом-воркером, большим планом или внешним Browserless.
+- **Сессия ATI** в `/tmp/atisu_session.json` — **теряется при рестарте** контейнера → чаще логин и тяжелее браузер; перспектива: хранить `storageState` в Supabase.
+- **FA-FA** по-прежнему завязан на DOM/форму — без полноценной эмуляции формы HTTP-замена нетривиальна.
+
+### Куда смотреть при следующем расследовании
+
+- Логи: префиксы `[PLAYWRIGHT]`, `[SCRAPE]`, `[FAFA]`, `[ATISU]`.
+- Сборка: `Dockerfile` + совпадение тега образа и `playwright` в `package.json`.
+- Алерты менеджеру: `MANAGER_CHAT_ID`, счётчики в `src/services/fafa.js` (cooldown на алерты).
+
+---
 
 > Р–РёРІРѕР№ Р¶СѓСЂРЅР°Р». РћР±РЅРѕРІР»СЏРµС‚СЃСЏ РїСЂРё РєР°Р¶РґРѕРј Р·РЅР°С‡РёРјРѕРј РёР·РјРµРЅРµРЅРёРё. РСЃС‚РѕС‡РЅРёРє РїСЂР°РІРґС‹ РјРµР¶РґСѓ СЃРµСЃСЃРёСЏРјРё Claude.
 
@@ -9,7 +49,7 @@
 - **РџСЂРѕРґ:** https://nurmak-production.up.railway.app/ вЂ” Railway РїСЂРѕРµРєС‚ `patient-sparkle / InstitutPro` (РїРѕ С„Р°РєС‚Сѓ: `789c93ee-6126-424c-9d1a-6c6ad113f637`)
 - **РЎС‚РµРє:** Node.js (ESM), Telegraf, Playwright, OpenAI (GPT-4o-mini + Whisper), Supabase, Railway
 - **Р РµРїРѕ:** `andyrbek2709-tech/Nurmak`, РІРµС‚РєР° `main`
-- **РџРѕСЃР»РµРґРЅРёР№ СЂР°Р±РѕС‡РёР№ РєРѕРјРјРёС‚ (origin/main):** `8765730` вЂ” Playwright РЅР° Railway: `--no-shell` РІ postinstall, СЂРµС‚СЂР°Рё launch, РѕР±С‰РёР№ `playwrightLaunch.js`.
+- **Недавние коммиты по стабильности Playwright:** `2cb3456`, `d14bc05` — детали в секции «Summary for AI agents» в начале файла; полная история: `git log`.
 - **Env (Railway):** `BOT_TOKEN`, `OPENAI_API_KEY`, `SUPABASE_URL`, `SUPABASE_KEY`, `MANAGER_CHAT_ID`, `WEBHOOK_DOMAIN`, `FAFA_LOGIN`, `FAFA_PASSWORD`, `ATISU_LOGIN`, `ATISU_PASSWORD`
 - РљРѕРјР°РЅРґС‹: `/filter /search /monitor /stop /new /active /today /help`
 
@@ -23,6 +63,11 @@
 - [ ] (Р·Р°РїРѕР»РЅРёС‚СЃСЏ РїРѕ РјРµСЂРµ СЂР°Р±РѕС‚С‹)
 
 ## РџРѕСЃР»РµРґРЅРёРµ РёР·РјРµРЅРµРЅРёСЏ (РЅРѕРІС‹Рµ СЃРІРµСЂС…Сѓ)
+
+### 2026-05-05 — docs + память для агентов
+- **Что:** в начало `STATE.md` добавлен блок **«Summary for AI agents»** (UTF-8): симптомы инцидента Playwright, таблица причин и исправлений, коммиты `2cb3456`/`d14bc05`, остаточные риски, куда смотреть при расследовании.
+- **Зачем:** любой агент или разработчик открывает один файл и видит актуальный контекст без «битых» старых строк кириллицы ниже по документу.
+- Код уже был в main ранее; эта запись только документирует и структурирует память.
 
 ### 2026-05-04 вЂ” fix(playwright/railway): install `--no-shell`, СЂРµС‚СЂР°Рё launch, РѕР±С‰РёР№ launch helper
 - **РџСЂРѕР±Р»РµРјР°:** РїРѕСЃР»Рµ С„РёРєСЃР° `channel: "chromium"` РјРѕРЅРёС‚РѕСЂРёРЅРі СЃРЅРѕРІР° СЃР»РѕРІРёР» Р°Р»РµСЂС‚ РїСЂРѕ РїРѕРІС‚РѕСЂРЅС‹Рµ `browserType.launch` / SIGTRAP; РІ 21:44 С‚РµС…. СЃРІРѕРґРєР° РґР°Р»Р° 0+0 (Р±СЂР°СѓР·РµСЂ РЅРµ РїРѕРґРЅРёРјР°Р»СЃСЏ).
