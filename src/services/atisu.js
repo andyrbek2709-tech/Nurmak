@@ -279,13 +279,16 @@ async function submitForm(page) {
 const COUNTRY_NAMES = new Set(Object.values({ RUS:"Россия",KAZ:"Казахстан",BLR:"Беларусь",UKR:"Украина",UZB:"Узбекистан",KGZ:"Кыргызстан",TJK:"Таджикистан",ARM:"Армения",AZE:"Азербайджан",GEO:"Грузия",MDA:"Молдова" }));
 
 async function fillSearchForm(page, filters) {
-  const fromVal = firstCity(filters.from);
+  const fromRaw = firstCity(filters.from);
   const toRaw   = firstCity(filters.to);
-  // Don't pass country-only values to ATI.SU city fields (e.g. "Россия", "Казахстан")
+  // ATI.SU city fields don't accept pure country names.
+  const fromVal = fromRaw && !COUNTRY_NAMES.has(fromRaw) ? fromRaw : null;
   const toVal   = toRaw && !COUNTRY_NAMES.has(toRaw) ? toRaw : null;
   if (!fromVal && !toVal) return;
 
-  console.log(`[ATISU] fillSearchForm: from="${fromVal}" to="${toVal || "(страна — пропуск)"}"`);
+  console.log(
+    `[ATISU] fillSearchForm: from="${fromVal || "(страна — пропуск)"}" to="${toVal || "(страна — пропуск)"}"`
+  );
 
   const fillCity = async (label, selectors, value) => {
     if (!value) return;
