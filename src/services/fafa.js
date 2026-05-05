@@ -6,7 +6,7 @@ import { trackEvent } from "./controlTower.js";
 
 const FAFA_URL = "https://fa-fa.kz";
 const SEARCH_URL = `${FAFA_URL}/search_load/`;
-const CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const NO_RESULTS_NOTIFY_MS = 60 * 60 * 1000;
 
 let _bot = null;
@@ -330,7 +330,7 @@ async function tick(chatId) {
       const atisuN = items.filter(i => i.source === "atisu").length;
       const msg =
         "🔍 За последний час новых объявлений по вашим фильтрам не появилось.\n\n" +
-        "Мониторинг активен: проверка каждые 5 минут — как только появится новое, пришлю сразу.\n\n" +
+        "Мониторинг активен: проверка каждые 15 минут — как только появится новое, пришлю сразу.\n\n" +
         `(тех. сводка: с сайтов пришло ${items.length} строк выдачи, новых для вас — 0; FA-FA.KZ ${fafaN}, ATI.SU ${atisuN})`;
       await _bot.telegram.sendMessage(chatId, msg).catch(e =>
         console.error("[FAFA] sendMessage error:", e.message)

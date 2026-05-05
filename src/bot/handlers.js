@@ -185,7 +185,7 @@ async function handleCallback(ctx) {
           await ctx.answerCbQuery("Мониторинг остановлен");
         } else {
           await ctx.answerCbQuery("Мониторинг запущен!");
-          await ctx.reply("▶️ Мониторинг запущен. Проверка каждые 5 минут.\nНовые грузы — сразу. Если ничего нового — раз в час.");
+          await ctx.reply("▶️ Мониторинг запущен. Проверка каждые 15 минут.\nНовые грузы — сразу. Если ничего нового — раз в час.");
           startMonitoring(chatId).catch(err => {
             console.error("[FAFA] startMonitoring error:", err.message);
             ctx.telegram.sendMessage(chatId, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
@@ -380,7 +380,7 @@ function buildFilterKeyboard(isActive = false) {
         { text: "🗑 Сбросить всё", callback_data: "fset:clear"  },
       ],
       [
-        { text: isActive ? "⏹ Остановить мониторинг" : "▶️ Мониторинг каждые 5 мин", callback_data: "fset:monitor" },
+        { text: isActive ? "⏹ Остановить мониторинг" : "▶️ Мониторинг каждые 15 мин", callback_data: "fset:monitor" },
       ],
     ],
   };
@@ -475,7 +475,7 @@ async function handleMonitor(ctx) {
       await stopMonitoring(chatId);
       await ctx.reply("⏹ Мониторинг остановлен.");
     } else {
-      await ctx.reply("▶️ Мониторинг запущен. Проверка каждые 5 минут.\nНовые грузы — сразу. Если ничего нового — раз в час.");
+      await ctx.reply("▶️ Мониторинг запущен. Проверка каждые 15 минут.\nНовые грузы — сразу. Если ничего нового — раз в час.");
       startMonitoring(chatId).catch(err => {
         console.error("[FAFA] startMonitoring error:", err.message);
         ctx.telegram.sendMessage(chatId, `❌ Ошибка мониторинга: ${err.message}`).catch(() => {});
@@ -541,7 +541,7 @@ async function handleHelp(ctx) {
     ``,
     `/filter — фильтры поиска (FA-FA.KZ + ATI.SU)`,
     `/search — разовый поиск по обоим сайтам`,
-    `/monitor — запустить мониторинг (каждые 5 мин)`,
+    `/monitor — запустить мониторинг (каждые 15 мин)`,
     `/stop — остановить мониторинг`,
     ``,
     `Новый груз — уведомление сразу.`,

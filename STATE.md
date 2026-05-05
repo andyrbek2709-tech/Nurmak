@@ -10,6 +10,8 @@
 
 Telegram-бот: поиск грузов на **FA-FA.KZ** и **ATI.SU** (Playwright), OpenAI, Supabase, деплой **Railway** через **Dockerfile** (`railway.json` → builder DOCKERFILE). Репо: `andyrbek2709-tech/Nurmak`, ветка `main`. Подробные правила: `CLAUDE.md`.
 
+**2026-05-06:** интервал мониторинга (/monitor): проверка **каждые 15 минут** (раньше 5 мин). Константа `CHECK_INTERVAL_MS` в `src/services/fafa.js`; тексты UI в `src/bot/handlers.js`.
+
 ### Инцидент 2026-05: алерты Playwright / «browser launch failed» / SIGTRAP / 0 строк в мониторинге
 
 **Симптомы:** в Telegram у менеджера периодически «Playwright browser launch failed…»; у пользователей тех. сводка **FA-FA 0, ATI 0**; в логах Railway — `browserType.launch`, **SIGTRAP**, нестабильный Chromium.
