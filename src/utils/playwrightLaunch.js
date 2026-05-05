@@ -8,9 +8,23 @@ const CHROMIUM_ARGS = [
   "--no-sandbox",
   "--disable-setuid-sandbox",
   "--disable-dev-shm-usage",
+  // Critical for Docker: prevents Chromium from forking a zygote process.
+  // Without this flag Chrome tries to fork() a renderer zygote on startup;
+  // in memory-constrained containers (Railway ≤1GB) that fork can fail
+  // mid-way and the OS sends SIGTRAP to the whole process group.
+  "--no-zygote",
   "--disable-gpu",
   "--disable-software-rasterizer",
   "--disable-extensions",
+  // Reduce background activity and memory footprint inside the container.
+  "--disable-background-networking",
+  "--disable-default-apps",
+  "--disable-sync",
+  "--mute-audio",
+  "--disable-hang-monitor",
+  "--disable-prompt-on-repost",
+  "--metrics-recording-only",
+  "--safebrowsing-disable-auto-update",
 ];
 
 /**

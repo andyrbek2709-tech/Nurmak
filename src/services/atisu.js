@@ -115,6 +115,16 @@ export async function scrapeAtisu(filters, sharedBrowser = null) {
     }
 
     const context = await browser.newContext(contextOpts);
+    // Block images/fonts/media — saves ~40-60% RAM per page load; not needed for scraping.
+    // page.route for /loads/search takes priority and is unaffected by this context route.
+    await context.route("**/*", (route) => {
+      const t = route.request().resourceType();
+      if (t === "image" || t === "media" || t === "font") {
+        route.abort().catch(() => {});
+      } else {
+        route.continue().catch(() => {});
+      }
+    });
     const page    = await context.newPage();
 
     // Use page.route() to intercept loads/search — no async race condition

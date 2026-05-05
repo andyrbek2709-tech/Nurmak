@@ -446,6 +446,15 @@ async function _scrapeFafa(filters, sharedBrowser = null) {
       locale: "ru-RU",
       viewport: { width: 1280, height: 900 },
     });
+    // Block images/fonts/media — saves ~40-60% RAM per page load; not needed for DOM scraping.
+    await context.route("**/*", (route) => {
+      const t = route.request().resourceType();
+      if (t === "image" || t === "media" || t === "font") {
+        route.abort().catch(() => {});
+      } else {
+        route.continue().catch(() => {});
+      }
+    });
     const page = await context.newPage();
 
     // Go to search page directly — it will show login form if not authenticated
